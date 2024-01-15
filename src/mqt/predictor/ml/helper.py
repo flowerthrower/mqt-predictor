@@ -18,6 +18,7 @@ from qiskit import QuantumCircuit
 
 from mqt.bench.utils import calc_supermarq_features
 from mqt.predictor import ml, reward, rl
+from mqt.predictor.graph_helper import circuit_to_graph
 
 if TYPE_CHECKING:
     from numpy._typing import NDArray
@@ -185,6 +186,12 @@ def create_feature_dict(qc: str | QuantumCircuit) -> dict[str, Any]:
     ops_list = qc.count_ops()
     ops_list_dict = dict_to_featurevector(ops_list)
 
+    ops_list_encoding = ops_list_dict.copy()
+    ops_list_encoding["measure"] = 0  # add extra gate
+    # unique number for each gate {'measure': 0, 'cx': 1, ...}
+    for i, key in enumerate(ops_list_dict):
+        ops_list_encoding[key] = i
+
     feature_dict = {}
     for key in ops_list_dict:
         feature_dict[key] = float(ops_list_dict[key])
@@ -198,6 +205,7 @@ def create_feature_dict(qc: str | QuantumCircuit) -> dict[str, Any]:
     feature_dict["entanglement_ratio"] = supermarq_features.entanglement_ratio
     feature_dict["parallelism"] = supermarq_features.parallelism
     feature_dict["liveness"] = supermarq_features.liveness
+    feature_dict["graph"] = circuit_to_graph(qc, ops_list_encoding)
     return feature_dict
 
 
