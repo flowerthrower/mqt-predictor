@@ -8,7 +8,7 @@ if TYPE_CHECKING:
 
 import numpy as np
 from gymnasium import Env
-from gymnasium.spaces import Box, Dict, Discrete
+from gymnasium.spaces import Box, Dict, Discrete, Graph
 from pytket.extensions.qiskit import qiskit_to_tk, tk_to_qiskit
 from qiskit import QuantumCircuit
 from qiskit.transpiler import CouplingMap, PassManager
@@ -78,6 +78,12 @@ class PredictorEnv(Env):  # type: ignore[misc]
             "parallelism": Box(low=0, high=1, shape=(1,), dtype=np.float32),
             "liveness": Box(low=0, high=1, shape=(1,), dtype=np.float32),
         }
+
+        Graph(
+            node_space=Box(low=0, high=1, shape=(1,), dtype=np.int8),
+            edge_space=Box(low=0, high=1, shape=(1,), dtype=np.int8),
+        )
+
         self.observation_space = Dict(spaces)
         self.filename = ""
 
