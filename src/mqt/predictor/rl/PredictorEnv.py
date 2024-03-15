@@ -10,7 +10,7 @@ import numpy as np
 from gymnasium import Env
 from gymnasium.spaces import Box, Dict, Discrete, Sequence
 from pytket.extensions.qiskit import qiskit_to_tk, tk_to_qiskit
-from qiskit import QuantumCircuit
+from qiskit import QuantumCircuit, transpile
 from qiskit.transpiler import CouplingMap, PassManager
 from qiskit.transpiler.passes import CheckMap, GatesInBasis
 from qiskit.transpiler.runningpassmanager import TranspileLayout
@@ -70,6 +70,8 @@ class PredictorEnv(Env):  # type: ignore[misc]
         self.reward_function = reward_function
         self.action_space = Discrete(len(self.action_set.keys()))
         self.num_steps = 0
+        self.last_fig_of_mer = None
+        self.init_fig_of_mer = None
         self.layout = None
 
         qubit_num, _max_depth = self.device.num_qubits, 10000
@@ -88,13 +90,13 @@ class PredictorEnv(Env):  # type: ignore[misc]
             "circuit": Sequence(
                 Box(
                     low=0,
-                    high=50,
+                    high=1,
                     shape=(
                         1,
                         qubit_num,
                         qubit_num,
                     ),
-                    dtype=np.int_,
+                    dtype=np.float_,
                 ),
             ),
         }
@@ -116,19 +118,39 @@ class PredictorEnv(Env):  # type: ignore[misc]
             )
 
         self.state: QuantumCircuit = altered_qc
-        self.num_steps += 1
 
         self.valid_actions = self.determine_valid_actions_for_state()
         if len(self.valid_actions) == 0:
             msg = "No valid actions left."
             raise RuntimeError(msg)
 
-        if action == self.action_terminate_index:
-            reward_val = self.calculate_reward()
-            done = True
+        # New: Reward for all mapped states
+        if self.action_terminate_index in self.valid_actions:
+            fig_of_mer = self.calculate_reward()
+
+            #if self.init_fig_of_mer is None:
+            #    self.init_fig_of_mer = fig_of_mer
+            #    self.last_fig_of_mer = fig_of_mer
+
+            if action == self.action_terminate_index:
+                # penalty for high number of steps
+                # discount_factor = 1 - (self.num_steps / 100)
+                reward_val = fig_of_mer # * discount_factor
+                done = True
+            else:
+                reward_val = fig_of_mer - self.last_fig_of_mer
+                done = False
+
+            self.last_fig_of_mer = fig_of_mer
+        # OG: Only reward for final state
+        #if action == self.action_terminate_index:
+        #    reward_val = self.calculate_reward()
+        #    done = True
         else:
             reward_val = 0
             done = False
+
+        self.num_steps += 1
 
         # in case the Qiskit.QuantumCircuit has unitary or u gates in it, decompose them (because otherwise qiskit will throw an error when applying the BasisTranslator
         if self.state.count_ops().get("unitary"):
@@ -137,14 +159,21 @@ class PredictorEnv(Env):  # type: ignore[misc]
         obs = rl.helper.create_feature_dict(self.state, self.features)
         return obs, reward_val, done, False, {}
 
-    def calculate_reward(self) -> Any:
+    def calculate_reward(self, init_circ: QuantumCircuit | None = None) -> Any:
         """Calculates and returns the reward for the current state."""
+        state = init_circ if init_circ else self.state
         if self.reward_function == "expected_fidelity":
-            return reward.expected_fidelity(self.state, self.device)
+            return reward.expected_fidelity(state, self.device)
         if self.reward_function == "critical_depth":
-            return reward.crit_depth(self.state)
+            return reward.crit_depth(state)
+        if self.reward_function == "expected_success_probability":
+            return reward.expected_success_probability(state, self.device)
         error_msg = f"Reward function {self.reward_function} not supported."
         raise ValueError(error_msg)
+    
+    def calculate_final_improvement(self) -> float:
+        """Calculates and returns the final improvement."""
+        return self.last_fig_of_mer - self.init_fig_of_mer
 
     def render(self) -> None:
         """Renders the current state."""
@@ -173,6 +202,18 @@ class PredictorEnv(Env):  # type: ignore[misc]
             self.state = QuantumCircuit.from_qasm_file(str(qc))
         else:
             self.state, self.filename = rl.helper.get_state_sample(self.device.num_qubits)
+
+        # Compile and map the circuit using qiskits minimum opt level and mapping method
+        init_state = transpile(
+            circuits=self.state,
+            basis_gates=self.device.basis_gates,
+            coupling_map=self.device.coupling_map,
+            layout_method="trivial",
+            optimization_level=0,
+        )
+        # To calculate an initial reward to benchmark the improvement
+        self.init_fig_of_mer = self.calculate_reward(init_state)
+        self.last_fig_of_mer = self.init_fig_of_mer
 
         self.action_space = Discrete(len(self.action_set.keys()))
         self.num_steps = 0
