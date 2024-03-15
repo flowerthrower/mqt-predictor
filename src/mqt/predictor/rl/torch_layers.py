@@ -38,8 +38,14 @@ class CustomCombinedExtractor(BaseFeaturesExtractor):  # type: ignore[misc]
     def __init__(
         self,
         observation_space: spaces.Dict,
-        cnn_output_dim: int = 256,
+        out_dim: int = 512,
         normalized_image: bool = False,
+        hidden_dim: int = 256,
+        out_channels: int = 32,
+        kernel_size: int = 3,
+        stride: int = 1,
+        padding: int = 1,
+        num_layers: int = 1,
     ) -> None:
         super().__init__(observation_space, features_dim=1)
 
@@ -48,8 +54,18 @@ class CustomCombinedExtractor(BaseFeaturesExtractor):  # type: ignore[misc]
         total_concat_size = 0
         for key, subspace in observation_space.spaces.items():
             if key == "circuit":
-                extractors[key] = CustomCNN(subspace, features_dim=cnn_output_dim, normalized_image=normalized_image)
-                total_concat_size += cnn_output_dim
+                extractors[key] = CustomCNN(
+                    subspace,
+                    out_dim,
+                    normalized_image,
+                    hidden_dim,
+                    out_channels,
+                    kernel_size,
+                    stride,
+                    padding,
+                    num_layers,
+                )
+                total_concat_size += out_dim
             else:
                 # The observation key is a vector, flatten it if needed
                 extractors[key] = nn.Flatten()
@@ -87,32 +103,43 @@ class CustomCNN(BaseFeaturesExtractor):  # type: ignore[misc]
     def __init__(
         self,
         observation_space: spaces.Box,
-        features_dim: int = 512,
+        out_dim: int = 512,
         normalized_image: bool = False,
+        hidden_dim: int = 256,
+        out_channels: int = 32,
+        kernel_size: int = 3,
+        stride: int = 1,
+        padding: int = 1,
+        num_layers: int = 1,
     ) -> None:
-        super().__init__(observation_space, features_dim)
+        super().__init__(observation_space, out_dim)
 
         if normalized_image:
             print("Normalized image is not supported yet.")
-        hidden_dim = 256
-        num_layers = 1
-        qubit_num, n_input_channels = 11, 1
-        self.cnn = nn.Conv2d(n_input_channels, out_channels=32, kernel_size=3, stride=1, padding=1)
+
+        qubit_num, n_input_channels = 25, 1
+        self.cnn = None
+        if n_input_channels != out_channels:
+            self.cnn = nn.Conv2d(n_input_channels, out_channels, kernel_size, stride, padding)
         self.lstm = nn.LSTM(
-            input_size=32 * qubit_num * qubit_num, hidden_size=hidden_dim, num_layers=num_layers, batch_first=True
+            input_size=out_channels * qubit_num * qubit_num,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
         )
-        self.linear = nn.Linear(hidden_dim, features_dim)
+        self.attention = nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=1, batch_first=True)
+        self.linear = nn.Linear(hidden_dim, out_dim)
 
     def forward(self, x: list[th.Tensor] | th.Tensor) -> th.Tensor:
         cnn_outs, lengths = [], []
+
         for sample in x:  # sample in batch
-            try:
-                seq_len, C, H, W = sample.shape
-                cnn_out = self.cnn(sample.float())  # batch, channel, height, width
-            except Exception as e:
-                msg = "Sample shape is not (seq_len, C, H, W)."
-                raise ValueError(msg) from e
-            cnn_out = F.relu(cnn_out.view(seq_len, -1))  # seq_len, out_channels * height * width
+            seq_len, C, H, W = sample.shape
+            # batch, channel, height, width
+            cnn_out = self.cnn(sample.float()) if self.cnn else sample.float()
+            # seq_len, out_channels * height * width
+            cnn_out = F.relu(cnn_out.view(seq_len, -1)) if self.cnn else cnn_out.view(seq_len, -1)
+
             cnn_outs.append(cnn_out)
             lengths.append(seq_len)
 
@@ -127,4 +154,7 @@ class CustomCNN(BaseFeaturesExtractor):  # type: ignore[misc]
         packed_output, _ = self.lstm(packed_input)
         lstm_out, _ = nn.utils.rnn.pad_packed_sequence(packed_output, batch_first=True)
 
-        return self.linear(lstm_out[:, -1, :])
+        # Apply attention
+        attn_out, _ = self.attention(lstm_out, lstm_out, lstm_out)
+
+        return self.linear(attn_out[:, -1, :])

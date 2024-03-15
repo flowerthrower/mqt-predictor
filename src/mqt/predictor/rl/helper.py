@@ -341,9 +341,9 @@ def get_state_sample(max_qubits: int | None = None) -> tuple[QuantumCircuit, str
 
 def encode_circuit(qc: QuantumCircuit) -> NDArray[np.int_]:
     # Define a mapping from gate names to integers
-    gate_dict = {x: i for i, x in enumerate(ml.helper.get_openqasm_gates())}
-    gate_dict["ctr"] = len(gate_dict.keys())
-    gate_dict["measure"] = len(gate_dict.keys())
+    gate_dict = {x: i for i, x in enumerate(ml.helper.get_openqasm_gates(), start=2)}
+    gate_dict["ctr"] = max(gate_dict.values()) + 1
+    gate_dict["measure"] = max(gate_dict.values()) + 1
 
     # Convert the circuit to a DAG and prepare the layers (wo barriers)
     dag = circuit_to_dag(qc)
@@ -353,11 +353,11 @@ def encode_circuit(qc: QuantumCircuit) -> NDArray[np.int_]:
     # Create a look-up table for qubit indices (needed for multiple registers)
     q_idx_LUT = {qubit: idx for idx, qubit in enumerate(dag.qubits)}
 
-    num_qubits, _max_depth = 11, 10000
+    num_qubits, _max_depth = 25, 10000
 
     matrix = []  # np.zeros((num_qubits, num_qubits, max_depth), dtype=np.int_)
     for _i, tensor_op in enumerate(layers[1:-1]):
-        layer = np.zeros((1, num_qubits, num_qubits), dtype=np.int_)
+        layer = np.zeros((1, num_qubits, num_qubits), dtype=np.float_)
         for node in tensor_op:
             try:
                 operation_name = node.op.name
@@ -377,6 +377,8 @@ def encode_circuit(qc: QuantumCircuit) -> NDArray[np.int_]:
                 for control in controls:
                     layer[0, control, q_idx] = gate_dict[operation_name]
                     layer[0, q_idx, control] = gate_dict["ctr"]
+        # normalize to greyscale values
+        layer = layer / max(gate_dict.values())
         matrix.append(layer)  # [:, :, i] = layer
 
     return np.array(matrix)
