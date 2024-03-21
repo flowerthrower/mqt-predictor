@@ -61,10 +61,10 @@ repos:
       - id: ruff
         args: ["--fix", "--show-fixes"]
         types_or: [python, pyi, jupyter]
-        exclude: "evaluations/supervised_ml_models/evaluation.ipynb"
+        exclude: "evaluations/supervised_ml_models/lrz_evaluation.ipynb"
       - id: ruff-format
         types_or: [python, pyi, jupyter]
-        exclude: "evaluations/supervised_ml_models/evaluation.ipynb"
+        exclude: "evaluations/supervised_ml_models/lrz_evaluation.ipynb"
 
   # Also run Black on examples in the documentation
   - repo: https://github.com/adamchainz/blacken-docs
