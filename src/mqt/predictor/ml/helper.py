@@ -138,6 +138,7 @@ def get_openqasm_gates() -> list[str]:
         "c3x",
         "c3sqrtx",
         "c4x",
+        "measure"
     ]
 
 
@@ -188,6 +189,10 @@ def create_feature_dict(qc: str | QuantumCircuit) -> dict[str, Any]:
     feature_dict["entanglement_ratio"] = supermarq_features.entanglement_ratio
     feature_dict["parallelism"] = supermarq_features.parallelism
     feature_dict["liveness"] = supermarq_features.liveness
+    # plus features
+    feature_dict["directed_program_communication"] = supermarq_features.directed_program_communication
+    feature_dict["single_qubit_gates_per_layer"] = supermarq_features.single_qubit_gates_per_layer
+    feature_dict["multi_qubit_gates_per_layer"] = supermarq_features.multi_qubit_gates_per_layer
     return feature_dict
 
 
