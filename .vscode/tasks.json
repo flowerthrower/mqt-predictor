@@ -1,0 +1,43 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Configure C++ Debug",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--preset", "debug"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Build C++ Debug",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--build", "--preset", "debug"],
+      "dependsOn": "Configure C++ Debug",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "Test C++ Debug",
+      "type": "process",
+      "command": "ctest",
+      "args": ["--preset", "debug"],
+      "dependsOn": "Build C++ Debug",
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Lint",
+      "type": "process",
+      "command": "uvx",
+      "args": ["nox", "-s", "lint"],
+      "problemMatcher": []
+    }
+  ]
+}

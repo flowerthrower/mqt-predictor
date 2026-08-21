@@ -4,6 +4,7 @@
 !.idea/runConfigurations
 !.idea/cmake.xml
 .vscode/*
+!.vscode/tasks.json
 *~
 
 __pycache__/
@@ -19,6 +20,8 @@ develop-eggs/
 dist/
 eggs/
 lib/
+!cpp/lib/
+!cpp/lib/*.cpp
 lib64/
 parts/
 sdist/
@@ -62,6 +65,7 @@ ehthumbs.db
 
 model_*.zip
 *.qasm
+!cpp/test/Inputs/*.qasm
 *-checkpoint.ipynb
 
 src/**/_version.py
