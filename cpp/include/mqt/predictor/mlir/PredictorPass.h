@@ -14,15 +14,18 @@
 
 #include <cstddef>
 #include <memory>
+#include <string>
 
 namespace mqt::predictor::compiler {
 
-enum class PolicyMode { Core, Bootstrap };
+enum class PolicyMode { Core, Bootstrap, Model };
 
 struct PredictorOptions {
   PolicyMode policy = PolicyMode::Bootstrap;
   std::size_t targetQubits = 5;
   std::size_t maxSteps = 16;
+  std::string targetPath;
+  std::string modelPath;
   bool trace = false;
 };
 

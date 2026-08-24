@@ -1,0 +1,16 @@
+{
+  "schema": "mqt-compiler-target/1",
+  "name": "experiment-line-4",
+  "sites": [0, 1, 2, 3],
+  "couplings": [
+    [0, 1],
+    [1, 2],
+    [2, 3]
+  ],
+  "operations": [
+    { "name": "u", "num_qubits": 1, "num_parameters": 3 },
+    { "name": "cx", "num_qubits": 2, "num_parameters": 0 },
+    { "name": "measure", "num_qubits": 1, "num_parameters": 0 },
+    { "name": "reset", "num_qubits": 1, "num_parameters": 0 }
+  ]
+}

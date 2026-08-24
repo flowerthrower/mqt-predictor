@@ -1,0 +1,125 @@
+{
+  "schema": "mqt-predictor-native-dataset/1",
+  "feature_names": [
+    "relative_qubits",
+    "log_depth",
+    "program_communication",
+    "critical_depth",
+    "entanglement_ratio",
+    "parallelism",
+    "liveness"
+  ],
+  "action_names": [
+    "merge-rotations",
+    "fuse-single-qubit",
+    "fuse-two-qubit",
+    "place-and-route",
+    "native-synthesis",
+    "terminate"
+  ],
+  "samples": [
+    {
+      "features": [0.75, 0.150515, 1.0, 1.0, 0.5, 0.0, 0.571429],
+      "legal": [true, true, false, true, true, false],
+      "action": "place-and-route",
+      "weight": 3.0
+    },
+    {
+      "features": [0.5, 0.03, 0.02, 0.0, 0.02, 0.9, 0.45],
+      "legal": [true, true, true, true, true, false],
+      "action": "place-and-route"
+    },
+    {
+      "features": [0.75, 0.05, 0.04, 0.0, 0.03, 0.75, 0.35],
+      "legal": [true, true, true, true, false, false],
+      "action": "place-and-route"
+    },
+    {
+      "features": [1.0, 0.07, 0.05, 0.05, 0.05, 0.7, 0.5],
+      "legal": [true, true, true, true, true, false],
+      "action": "place-and-route"
+    },
+    {
+      "features": [0.25, 0.45, 0.0, 0.0, 0.0, 0.2, 0.35],
+      "legal": [true, true, true, true, true, false],
+      "action": "merge-rotations"
+    },
+    {
+      "features": [0.5, 0.6, 0.02, 0.0, 0.01, 0.25, 0.3],
+      "legal": [true, true, true, true, true, false],
+      "action": "merge-rotations"
+    },
+    {
+      "features": [0.75, 0.75, 0.05, 0.0, 0.03, 0.15, 0.4],
+      "legal": [true, true, true, true, false, false],
+      "action": "merge-rotations"
+    },
+    {
+      "features": [1.0, 0.9, 0.08, 0.05, 0.05, 0.1, 0.3],
+      "legal": [true, true, true, true, true, false],
+      "action": "merge-rotations"
+    },
+    {
+      "features": [0.25, 0.3, 0.05, 0.0, 0.05, 0.35, 0.85],
+      "legal": [true, true, true, true, true, false],
+      "action": "fuse-single-qubit"
+    },
+    {
+      "features": [0.5, 0.4, 0.08, 0.0, 0.08, 0.3, 0.95],
+      "legal": [true, true, true, true, true, false],
+      "action": "fuse-single-qubit"
+    },
+    {
+      "features": [0.75, 0.5, 0.1, 0.05, 0.1, 0.25, 0.9],
+      "legal": [true, true, true, true, false, false],
+      "action": "fuse-single-qubit"
+    },
+    {
+      "features": [1.0, 0.6, 0.12, 0.05, 0.12, 0.2, 1.0],
+      "legal": [true, true, true, true, true, false],
+      "action": "fuse-single-qubit"
+    },
+    {
+      "features": [0.25, 0.2, 0.55, 0.65, 0.65, 0.3, 0.5],
+      "legal": [true, true, true, true, true, false],
+      "action": "fuse-two-qubit"
+    },
+    {
+      "features": [0.5, 0.3, 0.7, 0.8, 0.75, 0.25, 0.55],
+      "legal": [true, true, true, true, true, false],
+      "action": "fuse-two-qubit"
+    },
+    {
+      "features": [0.75, 0.4, 0.85, 0.9, 0.85, 0.2, 0.6],
+      "legal": [true, true, true, true, false, false],
+      "action": "fuse-two-qubit"
+    },
+    {
+      "features": [1.0, 0.5, 1.0, 1.0, 0.95, 0.15, 0.65],
+      "legal": [true, true, true, true, true, false],
+      "action": "fuse-two-qubit"
+    },
+    {
+      "features": [1.0, 0.166667, 0.333333, 1.0, 0.571429, 0.0, 0.388889],
+      "legal": [true, true, false, false, true, false],
+      "action": "merge-rotations",
+      "weight": 3.0
+    },
+    {
+      "features": [1.0, 0.150515, 0.333333, 1.0, 0.8, 0.0, 0.428571],
+      "legal": [true, true, false, false, true, false],
+      "action": "native-synthesis",
+      "weight": 3.0
+    },
+    {
+      "features": [0.5, 0.2, 0.2, 0.25, 0.2, 0.5, 0.5],
+      "legal": [false, false, false, false, false, true],
+      "action": "terminate"
+    },
+    {
+      "features": [1.0, 0.4, 0.6, 0.7, 0.6, 0.3, 0.7],
+      "legal": [false, false, false, false, false, true],
+      "action": "terminate"
+    }
+  ]
+}

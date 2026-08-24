@@ -34,18 +34,24 @@ struct DriverOptions {
   std::filesystem::path input;
   std::filesystem::path output = "-";
   PredictorOptions predictor;
+  bool policySpecified = false;
+  bool targetQubitsSpecified = false;
 };
 
 void printHelp(llvm::raw_ostream& output) {
-  output << "Usage: mqt-predictor-cc [options] <input.qasm|input.mlir>\n"
-            "\n"
-            "Options:\n"
-            "  -o <path>             Write QCO MLIR to path (default: stdout)\n"
-            "  --policy=<name>       bootstrap or core (default: bootstrap)\n"
-            "  --target-qubits=<n>   Size of the line target (default: 5)\n"
-            "  --max-steps=<n>       Maximum policy decisions (default: 16)\n"
-            "  --trace               Print features, states, and actions\n"
-            "  --help                Show this help\n";
+  output
+      << "Usage: mqt-predictor-cc [options] <input.qasm|input.mlir>\n"
+         "\n"
+         "Options:\n"
+         "  -o <path>             Write QCO MLIR to path (default: stdout)\n"
+         "  --policy=<name>       model, bootstrap, or core (default: "
+         "bootstrap)\n"
+         "  --model=<path>        Load a native JSON policy (implies model)\n"
+         "  --target=<path>       Load a JSON compiler target\n"
+         "  --target-qubits=<n>   Built-in line target size (default: 5)\n"
+         "  --max-steps=<n>       Maximum policy decisions (default: 16)\n"
+         "  --trace               Print features, states, and actions\n"
+         "  --help                Show this help\n";
 }
 
 [[nodiscard]] std::optional<std::size_t>
@@ -86,10 +92,31 @@ parseSize(const std::string_view value) {
         options.predictor.policy = PolicyMode::Bootstrap;
       } else if (policy == "core") {
         options.predictor.policy = PolicyMode::Core;
+      } else if (policy == "model") {
+        options.predictor.policy = PolicyMode::Model;
       } else {
         llvm::errs() << "unknown policy: " << policy << '\n';
         return std::nullopt;
       }
+      options.policySpecified = true;
+      continue;
+    }
+    if (argument.starts_with("--model=")) {
+      const auto path = argument.substr(std::string_view("--model=").size());
+      if (path.empty()) {
+        llvm::errs() << "--model requires a path\n";
+        return std::nullopt;
+      }
+      options.predictor.modelPath = path;
+      continue;
+    }
+    if (argument.starts_with("--target=")) {
+      const auto path = argument.substr(std::string_view("--target=").size());
+      if (path.empty()) {
+        llvm::errs() << "--target requires a path\n";
+        return std::nullopt;
+      }
+      options.predictor.targetPath = path;
       continue;
     }
     if (argument.starts_with("--target-qubits=")) {
@@ -101,6 +128,7 @@ parseSize(const std::string_view value) {
         return std::nullopt;
       }
       options.predictor.targetQubits = *parsed;
+      options.targetQubitsSpecified = true;
       continue;
     }
     if (argument.starts_with("--max-steps=")) {
@@ -128,6 +156,21 @@ parseSize(const std::string_view value) {
   if (options.input.empty()) {
     llvm::errs() << "missing input file\n";
     printHelp(llvm::errs());
+    return std::nullopt;
+  }
+  if (!options.predictor.modelPath.empty()) {
+    if (options.policySpecified &&
+        options.predictor.policy != PolicyMode::Model) {
+      llvm::errs() << "--model cannot be combined with a non-model policy\n";
+      return std::nullopt;
+    }
+    options.predictor.policy = PolicyMode::Model;
+  } else if (options.predictor.policy == PolicyMode::Model) {
+    llvm::errs() << "--policy=model requires --model=<path>\n";
+    return std::nullopt;
+  }
+  if (!options.predictor.targetPath.empty() && options.targetQubitsSpecified) {
+    llvm::errs() << "--target and --target-qubits are mutually exclusive\n";
     return std::nullopt;
   }
   return options;

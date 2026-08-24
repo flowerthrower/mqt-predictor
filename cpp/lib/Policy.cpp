@@ -18,10 +18,6 @@
 namespace mqt::predictor::compiler {
 namespace {
 
-constexpr auto ACTION_NAMES = std::array<std::string_view, NUM_ACTIONS>{
-    "merge-rotations", "fuse-single-qubit", "fuse-two-qubit",
-    "place-and-route", "native-synthesis",  "terminate"};
-
 // Feature order: relative qubits, normalized depth, communication,
 // critical depth, entanglement ratio, parallelism, and liveness.
 constexpr auto WEIGHTS =

@@ -33,6 +33,42 @@
       "problemMatcher": []
     },
     {
+      "label": "Train Native Demo Policy",
+      "type": "process",
+      "command": "uv",
+      "args": [
+        "run",
+        "--frozen",
+        "python",
+        "-m",
+        "mqt.predictor.compiled",
+        "--dataset",
+        "cpp/test/Inputs/line-4-training.json",
+        "--target",
+        "cpp/test/Inputs/line-4-target.json",
+        "--output",
+        "cpp/test/Inputs/line-4-policy.json",
+        "--core-revision",
+        "0c50dd30815638517aa159d20e78290cd449323e",
+        "--epochs",
+        "32"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Test Native Policy Python",
+      "type": "process",
+      "command": "uv",
+      "args": [
+        "run",
+        "--frozen",
+        "pytest",
+        "tests/compilation/test_compiled_policy.py"
+      ],
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
       "label": "Lint",
       "type": "process",
       "command": "uvx",

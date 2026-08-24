@@ -18,7 +18,9 @@
 #include "mlir/Dialect/QCO/Transforms/Passes.h"
 #include "mlir/Support/Passes.h"
 #include "mqt/predictor/mlir/CircuitFeatures.h"
+#include "mqt/predictor/mlir/Model.h"
 #include "mqt/predictor/mlir/Policy.h"
+#include "mqt/predictor/mlir/Target.h"
 
 #include <llvm/ADT/StringRef.h>
 #include <llvm/Support/Error.h>
@@ -31,38 +33,15 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
-#include <vector>
 
 namespace mqt::predictor::compiler {
 namespace {
 
 using Target = ::mlir::CompilerTarget;
-
-[[nodiscard]] llvm::Expected<Target> createLineTarget(const std::size_t size) {
-  if (size < 2) {
-    return llvm::createStringError(
-        "the experimental line target needs at least two qubits");
-  }
-
-  using Operation = Target::Operation;
-  std::vector<Operation> operations;
-  operations.emplace_back(llvm::cantFail(Operation::create("u", 1, 3)));
-  operations.emplace_back(llvm::cantFail(Operation::create("cx", 2, 0)));
-  operations.emplace_back(llvm::cantFail(Operation::create("measure", 1, 0)));
-  operations.emplace_back(llvm::cantFail(Operation::create("reset", 1, 0)));
-
-  std::vector<Target::Coupling> couplings;
-  couplings.reserve(size - 1);
-  for (std::size_t qubit = 0; qubit + 1 < size; ++qubit) {
-    couplings.emplace_back(static_cast<Target::SiteId>(qubit),
-                           static_cast<Target::SiteId>(qubit + 1));
-  }
-  return Target::create("predictor-line", size, std::move(couplings),
-                        std::move(operations));
-}
 
 [[nodiscard]] constexpr std::size_t actionIndex(const Action action) {
   return static_cast<std::size_t>(action);
@@ -173,13 +152,16 @@ public:
   }
 
   void runOnOperation() final {
-    auto target = createLineTarget(options_.targetQubits);
-    if (!target) {
-      getOperation().emitError() << llvm::toString(target.takeError());
+    auto loadedTarget = options_.targetPath.empty()
+                            ? createLineTarget(options_.targetQubits)
+                            : loadCompilerTarget(options_.targetPath);
+    if (!loadedTarget) {
+      getOperation().emitError() << llvm::toString(loadedTarget.takeError());
       signalPassFailure();
       return;
     }
-    if (failed(verifyStaticSites(getOperation(), *target)) ||
+    const auto& target = loadedTarget->target;
+    if (failed(verifyStaticSites(getOperation(), target)) ||
         failed(verifyLinearQubitStructure(getOperation()))) {
       signalPassFailure();
       return;
@@ -187,19 +169,34 @@ public:
 
     if (options_.policy == PolicyMode::Core) {
       ::mlir::OpPassManager pipeline(::mlir::ModuleOp::getOperationName());
-      ::mlir::populateTargetCompilationPipeline(pipeline, *target);
+      ::mlir::populateTargetCompilationPipeline(pipeline, target);
       if (failed(runPipeline(pipeline, getOperation())) ||
-          failed(verifyStaticSites(getOperation(), *target)) ||
+          failed(verifyStaticSites(getOperation(), target)) ||
           failed(verifyLinearQubitStructure(getOperation()))) {
         signalPassFailure();
       }
       return;
     }
 
+    std::optional<LinearPolicyModel> model;
+    if (options_.policy == PolicyMode::Model) {
+      auto loadedModel =
+          LinearPolicyModel::load(options_.modelPath, loadedTarget->fingerprint,
+                                  MQT_PREDICTOR_CORE_REVISION);
+      if (!loadedModel) {
+        getOperation().emitError() << llvm::toString(loadedModel.takeError());
+        signalPassFailure();
+        return;
+      }
+      model.emplace(std::move(*loadedModel));
+    }
+
     auto backup = ::mlir::OwningOpRef<::mlir::ModuleOp>(
         ::mlir::cast<::mlir::ModuleOp>(getOperation()->clone()));
-    if (succeeded(runBootstrap(getOperation(), *target))) {
-      if (failed(verifyStaticSites(getOperation(), *target)) ||
+    if (succeeded(runBootstrap(getOperation(), target,
+                               loadedTarget->fingerprint,
+                               model ? &*model : nullptr))) {
+      if (failed(verifyStaticSites(getOperation(), target)) ||
           failed(verifyLinearQubitStructure(getOperation()))) {
         signalPassFailure();
       }
@@ -214,9 +211,9 @@ public:
                       "pipeline\n";
     }
     ::mlir::OpPassManager fallback(::mlir::ModuleOp::getOperationName());
-    ::mlir::populateTargetCompilationPipeline(fallback, *target);
+    ::mlir::populateTargetCompilationPipeline(fallback, target);
     if (failed(runPipeline(fallback, getOperation())) ||
-        failed(verifyStaticSites(getOperation(), *target)) ||
+        failed(verifyStaticSites(getOperation(), target)) ||
         failed(verifyLinearQubitStructure(getOperation()))) {
       signalPassFailure();
     }
@@ -224,7 +221,9 @@ public:
 
 private:
   [[nodiscard]] ::mlir::LogicalResult
-  runBootstrap(const ::mlir::ModuleOp module, const Target& target) {
+  runBootstrap(const ::mlir::ModuleOp module, const Target& target,
+               const std::string_view targetFingerprint,
+               const LinearPolicyModel* model) {
     BootstrapLinearPolicy policy;
     std::set<std::pair<std::string, std::size_t>> attemptedTransitions;
     bool needsFinalization = false;
@@ -245,11 +244,14 @@ private:
             attemptedTransitions.contains({fingerprint, action});
       }
       const auto legal = legalActions(analysis->state, suppressed);
-      const auto decision = policy.select(analysis->features.values, legal);
+      const auto decision =
+          model != nullptr ? model->select(analysis->features.values, legal)
+                           : policy.select(analysis->features.values, legal);
       if (!decision) {
         return ::mlir::failure();
       }
-      traceDecision(step, *analysis, *decision);
+      traceDecision(step, *analysis, *decision, target, targetFingerprint,
+                    model);
 
       if (decision->action == Action::Terminate) {
         if (needsFinalization) {
@@ -335,15 +337,27 @@ private:
   }
 
   void traceDecision(const std::size_t step, const CircuitAnalysis& analysis,
-                     const Decision& decision) const {
+                     const Decision& decision, const Target& target,
+                     const std::string_view targetFingerprint,
+                     const LinearPolicyModel* model) const {
     if (!options_.trace) {
       return;
     }
     if (step == 0) {
       llvm::errs() << "[mqt-predictor] schema=" << EXPERIMENT_SCHEMA
                    << " core_pin=" << MQT_PREDICTOR_CORE_REVISION
-                   << " target=line/" << options_.targetQubits
-                   << " native_ops=u,cx,measure,reset objective=none\n";
+                   << " target=" << target.name().value_or("unnamed")
+                   << " target_fingerprint=" << targetFingerprint
+                   << " policy=" << (model == nullptr ? "bootstrap" : "model");
+      if (model == nullptr) {
+        llvm::errs() << " objective=none\n";
+      } else {
+        llvm::errs() << " model_schema=" << NATIVE_POLICY_SCHEMA
+                     << " artifact_id=" << model->artifactId()
+                     << " parameters_sha256=" << model->parametersChecksum()
+                     << " training=" << model->trainingAlgorithm()
+                     << " objective=" << model->objective() << '\n';
+      }
     }
     llvm::errs() << "[mqt-predictor] step=" << step
                  << " action=" << actionName(decision.action)

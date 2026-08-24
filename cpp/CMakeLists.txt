@@ -13,8 +13,10 @@ add_mlir_library(
   MQTPredictorMLIR
   DISABLE_INSTALL
   lib/CircuitFeatures.cpp
+  lib/Model.cpp
   lib/Policy.cpp
   lib/PredictorPass.cpp
+  lib/Target.cpp
   ADDITIONAL_HEADER_DIRS
   ${MQT_PREDICTOR_MLIR_INCLUDE_DIR}
   LINK_LIBS
@@ -36,8 +38,10 @@ target_sources(
          ${MQT_PREDICTOR_MLIR_INCLUDE_DIR}
          FILES
          ${MQT_PREDICTOR_MLIR_INCLUDE_DIR}/mqt/predictor/mlir/CircuitFeatures.h
+         ${MQT_PREDICTOR_MLIR_INCLUDE_DIR}/mqt/predictor/mlir/Model.h
          ${MQT_PREDICTOR_MLIR_INCLUDE_DIR}/mqt/predictor/mlir/Policy.h
-         ${MQT_PREDICTOR_MLIR_INCLUDE_DIR}/mqt/predictor/mlir/PredictorPass.h)
+         ${MQT_PREDICTOR_MLIR_INCLUDE_DIR}/mqt/predictor/mlir/PredictorPass.h
+         ${MQT_PREDICTOR_MLIR_INCLUDE_DIR}/mqt/predictor/mlir/Target.h)
 
 target_compile_features(MQTPredictorMLIR PUBLIC cxx_std_20)
 set_target_properties(MQTPredictorMLIR PROPERTIES UNITY_BUILD OFF)
@@ -54,6 +58,19 @@ mqt_mlir_target_use_project_options(mqt-predictor-cc)
 mlir_check_all_link_libraries(mqt-predictor-cc)
 
 if(BUILD_TESTING)
+  add_executable(mqt-predictor-artifact-test test/ArtifactTest.cpp)
+  target_link_libraries(mqt-predictor-artifact-test PRIVATE MQTPredictorMLIR)
+  target_compile_features(mqt-predictor-artifact-test PRIVATE cxx_std_20)
+  set_target_properties(mqt-predictor-artifact-test PROPERTIES UNITY_BUILD OFF)
+  mqt_mlir_target_use_project_options(mqt-predictor-artifact-test)
+
+  add_test(
+    NAME mqt-predictor-artifact-test
+    COMMAND
+      mqt-predictor-artifact-test
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-target.json
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-policy.json)
+
   add_executable(mqt-predictor-policy-test test/PolicyTest.cpp)
   target_link_libraries(mqt-predictor-policy-test PRIVATE MQTPredictorMLIR)
   target_compile_features(mqt-predictor-policy-test PRIVATE cxx_std_20)
@@ -61,6 +78,19 @@ if(BUILD_TESTING)
   mqt_mlir_target_use_project_options(mqt-predictor-policy-test)
 
   add_test(NAME mqt-predictor-policy-test COMMAND mqt-predictor-policy-test)
+
+  add_test(
+    NAME mqt-predictor-model-e2e
+    COMMAND
+      mqt-predictor-cc --trace
+      --target=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-target.json
+      --model=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-policy.json -o
+      ${CMAKE_CURRENT_BINARY_DIR}/bell-model.mlir
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/bell.qasm)
+  set_tests_properties(
+    mqt-predictor-model-e2e
+    PROPERTIES PASS_REGULAR_EXPRESSION "policy=model.*action=terminate"
+               FAIL_REGULAR_EXPRESSION "falling back;error:")
 
   add_test(
     NAME mqt-predictor-bootstrap-e2e

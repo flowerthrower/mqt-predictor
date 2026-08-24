@@ -41,6 +41,9 @@ enum class Action : std::uint8_t {
 
 inline constexpr std::size_t NUM_ACTIONS =
     static_cast<std::size_t>(Action::Count);
+inline constexpr std::array<std::string_view, NUM_ACTIONS> ACTION_NAMES{
+    "merge-rotations", "fuse-single-qubit", "fuse-two-qubit",
+    "place-and-route", "native-synthesis",  "terminate"};
 using ActionMask = std::array<bool, NUM_ACTIONS>;
 
 struct CompilerState {
@@ -70,8 +73,7 @@ struct Decision {
  * A dependency-free actor used to exercise the compiled policy boundary.
  *
  * The coefficients are deliberately simple bootstrap values, not trained model
- * weights. The interface and schema are experimental and require matching
- * training/export code before a learned actor can replace this bootstrap.
+ * weights. The matching artifact path uses LinearPolicyModel instead.
  */
 class BootstrapLinearPolicy final {
 public:

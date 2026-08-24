@@ -1,14 +1,14 @@
 # Compiled MLIR predictor experiment
 
-This directory contains an inference-runtime-free C++ bootstrap for a
-v3-inspired compiled policy experiment. It runs as an MLIR `ModuleOp` pass and
-uses MQT Core's native optimization, mapping, routing, synthesis, and
-verification passes.
+This directory contains an inference-runtime-free C++ policy experiment. It runs
+as an MLIR `ModuleOp` pass and uses MQT Core's native optimization, mapping,
+routing, synthesis, and verification passes.
 
-The current actor is a deterministic linear bootstrap policy. Its coefficients
-are not trained Predictor weights, and its schema is not compatible with the
-Python Predictor v3 model. The feature and action contracts are experimental
-boundaries for later matching training and export code.
+The driver supports both its original hand-written bootstrap actor and a
+target-specific linear model exported by the matching Python trainer. The
+artifact is validated against its feature/action order, parameter checksum,
+target fingerprint, and exact MQT Core revision before inference. It is not
+compatible with existing Predictor v3 models.
 
 ## Build
 
@@ -35,12 +35,34 @@ in with a working cache installation.
 ## Run
 
 ```console
-build/debug/cpp/mqt-predictor-cc --trace --target-qubits=4 \
+build/debug/cpp/mqt-predictor-cc --trace \
+  --target=cpp/test/Inputs/line-4-target.json \
+  --model=cpp/test/Inputs/line-4-policy.json \
   -o build/debug/predicted.mlir cpp/test/Inputs/bell.qasm
 ```
 
-Use `--policy=core` to run Core's canonical target pipeline as a baseline. The
-driver accepts OpenQASM 3 or QCO MLIR and emits QCO MLIR.
+Use `--policy=bootstrap` for the hand-written actor or `--policy=core` for
+Core's canonical target pipeline. `--model` implies `--policy=model`. The driver
+accepts OpenQASM 3 or QCO MLIR and emits QCO MLIR.
+
+## Minimal trainer/exporter
+
+The checked-in demo uses 20 tiny imitation examples and only 32 full-batch
+updates. This is enough to prove the train/export/load boundary locally; it is
+not an RL campaign or a quality result.
+
+```console
+uv run python -m mqt.predictor.compiled \
+  --dataset cpp/test/Inputs/line-4-training.json \
+  --target cpp/test/Inputs/line-4-target.json \
+  --output cpp/test/Inputs/line-4-policy.json \
+  --core-revision 0c50dd30815638517aa159d20e78290cd449323e \
+  --epochs 32
+```
+
+The exporter records the current Git revision (with `+dirty` when applicable)
+unless `--source-revision` is provided. The same command is available as the
+`Train Native Demo Policy` VS Code task.
 
 ## Experimental policy contract
 
@@ -64,6 +86,23 @@ prints the ordered feature values and every decision. The full SDK action space,
 separate layout and routing stages, learned objective, and v3 final-optimization
 stage are not represented.
 
+The learned artifact schema is `mqt-predictor-native-policy/1`. Its only
+supported architecture is an action-major float32 linear layer with seven inputs
+and six outputs. C++ performs masked deterministic argmax directly; no Python,
+PyTorch, ONNX, or other inference runtime is loaded.
+
+## Compiler target JSON
+
+Target schema `mqt-compiler-target/1` contains a name, ordered integer site IDs,
+an optional undirected coupling list, and native operation signatures. See
+`test/Inputs/line-4-target.json`. The loader constructs Core's validated
+`CompilerTarget` and derives a deterministic fingerprint from its normalized
+topology and operation set.
+
+This first target schema intentionally excludes calibration, durations,
+site-specific gate support, and live QDMI device discovery. Those need a reward
+contract before they can contribute meaningfully to training.
+
 ## Experiment boundary
 
 The native path currently supports straight-line, scalar-QCO entry points. Each
@@ -73,6 +112,7 @@ are rejected conservatively across the whole module.
 
 Tensor-backed registers, quantum control flow, failed actions, and exhausted
 decision budgets restore the original module and use Core's canonical pipeline.
-The built-in trial target is a line topology with `u`, `cx`, `measure`, and
-`reset`; production device loading and trained model import are deliberately out
-of scope for this first experiment.
+The built-in line target remains available through `--target-qubits` for the
+bootstrap and Core policies. Model artifacts are deliberately target-specific; a
+target, Core, schema, ordering, dimension, or checksum mismatch is a hard
+configuration error rather than a silent fallback.
