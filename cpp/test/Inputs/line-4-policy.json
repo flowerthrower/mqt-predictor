@@ -74,6 +74,6 @@
     "objective": "bootstrap action imitation",
     "samples": 20,
     "seed": 7,
-    "source_revision": "7f3e030f95b5e59f9ff607d1547d3f92252b50ba"
+    "source_revision": "8bf4df435fed78e3fe582911385d5ddf21043684"
   }
 }
