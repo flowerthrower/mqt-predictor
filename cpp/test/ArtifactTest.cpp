@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <random>
 
 int main(const int argc, char** argv) {
   using namespace mqt::predictor::compiler;
@@ -45,6 +46,14 @@ int main(const int argc, char** argv) {
   const auto decision = model->select(features, legal);
   if (!decision || decision->action != Action::FuseTwoQubit) {
     std::cerr << "native model did not reproduce the exported decision\n";
+    return EXIT_FAILURE;
+  }
+
+  std::mt19937_64 generator(7);
+  const ActionMask onlyMapping{false, false, false, true, false, false};
+  const auto sampled = model->sample(features, onlyMapping, generator);
+  if (!sampled || sampled->action != Action::PlaceAndRoute) {
+    std::cerr << "native model did not respect the sampled action mask\n";
     return EXIT_FAILURE;
   }
 

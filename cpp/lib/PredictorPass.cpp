@@ -36,6 +36,7 @@
 #include <cstddef>
 #include <memory>
 #include <optional>
+#include <random>
 #include <set>
 #include <string>
 #include <tuple>
@@ -48,6 +49,9 @@ namespace {
 using Target = ::mlir::CompilerTarget;
 using CandidateScore =
     std::tuple<std::size_t, std::size_t, std::size_t, std::size_t>;
+using ObservationFingerprint =
+    std::tuple<std::size_t, std::size_t, std::size_t, std::size_t, std::size_t,
+               bool, bool, bool, FeatureVector>;
 
 struct ExhaustiveCandidate {
   ::mlir::OwningOpRef<::mlir::ModuleOp> module;
@@ -65,6 +69,19 @@ struct ExhaustiveCandidate {
   llvm::raw_string_ostream stream(fingerprint);
   module.print(stream);
   return fingerprint;
+}
+
+[[nodiscard]] ObservationFingerprint
+observationFingerprint(const CircuitAnalysis& analysis) {
+  return {analysis.features.numQubits,
+          analysis.features.depth,
+          analysis.features.twoQubitDepth,
+          analysis.features.numGates,
+          analysis.features.numTwoQubitGates,
+          analysis.state.mapped,
+          analysis.state.routed,
+          analysis.state.synthesized,
+          analysis.features.values};
 }
 
 [[nodiscard]] std::vector<std::vector<Action>>
@@ -405,9 +422,16 @@ private:
                const std::string_view targetFingerprint,
                const LinearPolicyModel* model) {
     BootstrapLinearPolicy policy;
-    std::set<std::pair<std::string, std::size_t>> attemptedTransitions;
-    bool needsFinalization = false;
-    for (std::size_t step = 0; step < options_.maxSteps; ++step) {
+    std::mt19937_64 generator(options_.samplingSeed);
+    std::set<std::pair<ObservationFingerprint, std::size_t>>
+        attemptedTransitions;
+    ::mlir::OpPassManager preparation(::mlir::ModuleOp::getOperationName());
+    ::populateDecomposeMultiControlledPipeline(preparation, 3);
+    if (failed(runPipeline(preparation, module))) {
+      return ::mlir::failure();
+    }
+    bool needsFinalization = true;
+    for (std::size_t step = 0;;) {
       const auto analysis = analyzeCircuit(module, target);
       if (failed(analysis)) {
         if (options_.trace) {
@@ -417,23 +441,26 @@ private:
         return ::mlir::failure();
       }
 
-      const auto fingerprint = moduleFingerprint(module);
+      const auto moduleBefore = moduleFingerprint(module);
+      const auto observation = observationFingerprint(*analysis);
       ActionMask suppressed{};
       for (std::size_t action = 0; action < suppressed.size(); ++action) {
         suppressed[action] =
-            attemptedTransitions.contains({fingerprint, action});
+            attemptedTransitions.contains({observation, action});
       }
       const auto legal = legalActions(analysis->state, suppressed);
       const auto decision =
-          model != nullptr ? model->select(analysis->features.values, legal)
-                           : policy.select(analysis->features.values, legal);
+          model != nullptr
+              ? options_.samplePolicy
+                    ? model->sample(analysis->features.values, legal, generator)
+                    : model->select(analysis->features.values, legal)
+              : policy.select(analysis->features.values, legal);
       if (!decision) {
         return ::mlir::failure();
       }
-      traceDecision(step, *analysis, *decision, target, targetFingerprint,
-                    model);
-
       if (decision->action == Action::Terminate) {
+        traceDecision(step, *analysis, *decision, target, targetFingerprint,
+                      legal, model);
         if (needsFinalization) {
           return finalizeForTarget(module, target);
         }
@@ -441,12 +468,21 @@ private:
         finish.addPass(::mlir::qco::createVerifyTargetConformance(target));
         return runPipeline(finish, module);
       }
+      if (step == options_.maxSteps) {
+        if (options_.trace) {
+          llvm::errs() << "[mqt-predictor] exhausted transformation budget="
+                       << options_.maxSteps << '\n';
+        }
+        return ::mlir::failure();
+      }
+      traceDecision(step, *analysis, *decision, target, targetFingerprint,
+                    legal, model);
 
       if (failed(runAction(module, target, decision->action))) {
         return ::mlir::failure();
       }
-      attemptedTransitions.emplace(fingerprint, actionIndex(decision->action));
-      const auto changed = fingerprint != moduleFingerprint(module);
+      attemptedTransitions.emplace(observation, actionIndex(decision->action));
+      const auto changed = moduleBefore != moduleFingerprint(module);
       if (decision->action == Action::NativeSynthesis) {
         needsFinalization = false;
       } else if (changed) {
@@ -458,8 +494,8 @@ private:
                        << actionName(decision->action) << '\n';
         }
       }
+      ++step;
     }
-    return ::mlir::failure();
   }
 
   [[nodiscard]] ::mlir::LogicalResult
@@ -512,6 +548,7 @@ private:
       pipeline.addPass(::mlir::qco::createFuseTwoQubitGates());
       break;
     case Action::PlaceAndRoute: {
+      ::populateQCOCleanupPipeline(pipeline);
       pipeline.addPass(::mlir::qco::createMappingPass(target, {}));
       break;
     }
@@ -528,6 +565,7 @@ private:
   void traceDecision(const std::size_t step, const CircuitAnalysis& analysis,
                      const Decision& decision, const Target& target,
                      const std::string_view targetFingerprint,
+                     const ActionMask& legal,
                      const LinearPolicyModel* model) const {
     if (!options_.trace) {
       return;
@@ -545,19 +583,25 @@ private:
                      << " artifact_id=" << model->artifactId()
                      << " parameters_sha256=" << model->parametersChecksum()
                      << " training=" << model->trainingAlgorithm()
-                     << " objective=" << model->objective() << '\n';
+                     << " objective=" << model->objective() << " sampling="
+                     << (options_.samplePolicy ? "stochastic" : "argmax")
+                     << " sampling_seed=" << options_.samplingSeed << '\n';
       }
     }
     llvm::errs() << "[mqt-predictor] step=" << step
                  << " action=" << actionName(decision.action)
                  << " qubits=" << analysis.features.numQubits
                  << " depth=" << analysis.features.depth
+                 << " two_qubit_depth=" << analysis.features.twoQubitDepth
                  << " gates=" << analysis.features.numGates
                  << " two_qubit=" << analysis.features.numTwoQubitGates
                  << " mapped=" << analysis.state.mapped
                  << " routed=" << analysis.state.routed
-                 << " synthesized=" << analysis.state.synthesized
-                 << " features={";
+                 << " synthesized=" << analysis.state.synthesized << " legal=";
+    for (const auto enabled : legal) {
+      llvm::errs() << static_cast<unsigned>(enabled);
+    }
+    llvm::errs() << " features={";
     for (std::size_t index = 0; index < FEATURE_NAMES.size(); ++index) {
       if (index != 0) {
         llvm::errs() << ',';

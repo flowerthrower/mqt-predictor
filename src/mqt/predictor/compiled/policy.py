@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import struct
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -29,6 +30,7 @@ OBSERVATION_SCHEMA = "mqt-predictor-bootstrap/1"
 NATIVE_POLICY_SCHEMA = "mqt-predictor-native-policy/1"
 COMPILER_TARGET_SCHEMA = "mqt-compiler-target/1"
 TARGET_FINGERPRINT_SCHEMA = b"mqt-compiler-target-fingerprint/1"
+TARGET_FINGERPRINT_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
 
 FEATURE_NAMES = (
     "relative_qubits",
@@ -240,7 +242,8 @@ def export_linear_policy(
     path: Path,
     policy: LinearPolicy,
     *,
-    target: Path,
+    target: Path | None = None,
+    target_fingerprint_override: str | None = None,
     core_revision: str,
     source_revision: str,
     algorithm: str,
@@ -258,6 +261,15 @@ def export_linear_policy(
     if samples <= 0 or epochs <= 0 or learning_rate <= 0 or l2 < 0 or seed < 0:
         msg = "artifact training metadata is invalid"
         raise ValueError(msg)
+    if (target is None) == (target_fingerprint_override is None):
+        msg = "exactly one target or target fingerprint must be provided"
+        raise ValueError(msg)
+    compiler_target_fingerprint = (
+        target_fingerprint(target) if target is not None else cast("str", target_fingerprint_override)
+    )
+    if TARGET_FINGERPRINT_PATTERN.fullmatch(compiler_target_fingerprint) is None:
+        msg = "target fingerprint must be a lowercase SHA-256 digest"
+        raise ValueError(msg)
     document = {
         "schema": NATIVE_POLICY_SCHEMA,
         "observation_schema": OBSERVATION_SCHEMA,
@@ -274,7 +286,7 @@ def export_linear_policy(
         },
         "parameters_sha256": parameter_checksum(policy.weights, policy.bias),
         "compatibility": {
-            "target_fingerprint": target_fingerprint(target),
+            "target_fingerprint": compiler_target_fingerprint,
             "core_revision": core_revision,
         },
         "training": {

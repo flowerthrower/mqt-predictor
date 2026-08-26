@@ -100,6 +100,19 @@ if(BUILD_TESTING)
                FAIL_REGULAR_EXPRESSION "falling back;error:")
 
   add_test(
+    NAME mqt-predictor-register-model-e2e
+    COMMAND
+      mqt-predictor-cc --trace --max-steps=100
+      --target=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-target.json
+      --model=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-policy.json -o
+      ${CMAKE_CURRENT_BINARY_DIR}/register-model.mlir
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/register-routing.qasm)
+  set_tests_properties(
+    mqt-predictor-register-model-e2e
+    PROPERTIES PASS_REGULAR_EXPRESSION "policy=model.*action=terminate"
+               FAIL_REGULAR_EXPRESSION "falling back;error:")
+
+  add_test(
     NAME mqt-predictor-bootstrap-e2e
     COMMAND
       mqt-predictor-cc --trace --target-qubits=4 -o
@@ -161,7 +174,7 @@ if(BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/bell.qasm)
   set_tests_properties(
     mqt-predictor-fallback-e2e PROPERTIES PASS_REGULAR_EXPRESSION
-                                              "falling back to Core's canonical target pipeline")
+                                              "exhausted transformation budget=1")
 
   add_test(
     NAME mqt-predictor-rejects-duplicate-sites

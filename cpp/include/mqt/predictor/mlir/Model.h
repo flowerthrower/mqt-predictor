@@ -17,6 +17,7 @@
 #include <array>
 #include <filesystem>
 #include <optional>
+#include <random>
 #include <string>
 #include <string_view>
 
@@ -36,6 +37,11 @@ public:
   [[nodiscard]] std::optional<Decision> select(const FeatureVector& features,
                                                const ActionMask& legal) const;
 
+  [[nodiscard]] std::optional<Decision> sample(const FeatureVector& features,
+                                               const ActionMask& legal,
+                                               std::mt19937_64& generator,
+                                               float temperature = 1.0F) const;
+
   [[nodiscard]] std::string_view parametersChecksum() const noexcept;
   [[nodiscard]] std::string_view artifactId() const noexcept;
   [[nodiscard]] std::string_view objective() const noexcept;
@@ -47,6 +53,9 @@ private:
   LinearPolicyModel(WeightMatrix weights, std::array<float, NUM_ACTIONS> biases,
                     std::string parametersChecksum, std::string artifactId,
                     std::string objective, std::string trainingAlgorithm);
+
+  [[nodiscard]] std::optional<Decision> evaluate(const FeatureVector& features,
+                                                 const ActionMask& legal) const;
 
   WeightMatrix weights_{};
   std::array<float, NUM_ACTIONS> biases_{};

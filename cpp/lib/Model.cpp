@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <random>
 #include <string>
 #include <utility>
 #include <vector>
@@ -268,16 +269,17 @@ LinearPolicyModel::load(const std::filesystem::path& path,
 }
 
 std::optional<Decision>
-LinearPolicyModel::select(const FeatureVector& features,
-                          const ActionMask& legal) const {
+LinearPolicyModel::evaluate(const FeatureVector& features,
+                            const ActionMask& legal) const {
   Decision decision{.action = Action::Terminate};
   decision.logits.fill(-std::numeric_limits<float>::infinity());
 
-  std::optional<std::size_t> selected;
+  bool hasLegalAction = false;
   for (std::size_t action = 0; action < NUM_ACTIONS; ++action) {
     if (!legal[action]) {
       continue;
     }
+    hasLegalAction = true;
     double logit = biases_[action];
     for (std::size_t feature = 0; feature < NUM_FEATURES; ++feature) {
       if (!std::isfinite(features[feature]) || features[feature] < 0.0F ||
@@ -293,14 +295,59 @@ LinearPolicyModel::select(const FeatureVector& features,
     }
     const auto storedLogit = static_cast<float>(logit);
     decision.logits[action] = storedLogit;
-    if (!selected || storedLogit > decision.logits[*selected]) {
+  }
+  if (!hasLegalAction) {
+    return std::nullopt;
+  }
+  return decision;
+}
+
+std::optional<Decision>
+LinearPolicyModel::select(const FeatureVector& features,
+                          const ActionMask& legal) const {
+  auto decision = evaluate(features, legal);
+  if (!decision) {
+    return std::nullopt;
+  }
+
+  std::optional<std::size_t> selected;
+  for (std::size_t action = 0; action < NUM_ACTIONS; ++action) {
+    if (!legal[action]) {
+      continue;
+    }
+    if (!selected || decision->logits[action] > decision->logits[*selected]) {
       selected = action;
     }
   }
-  if (!selected) {
+  decision->action = static_cast<Action>(*selected);
+  return decision;
+}
+
+std::optional<Decision>
+LinearPolicyModel::sample(const FeatureVector& features,
+                          const ActionMask& legal, std::mt19937_64& generator,
+                          const float temperature) const {
+  if (!std::isfinite(temperature) || temperature <= 0.0F) {
     return std::nullopt;
   }
-  decision.action = static_cast<Action>(*selected);
+  auto decision = evaluate(features, legal);
+  if (!decision) {
+    return std::nullopt;
+  }
+
+  const auto maximum =
+      *std::max_element(decision->logits.begin(), decision->logits.end());
+  std::array<double, NUM_ACTIONS> probabilities{};
+  for (std::size_t action = 0; action < NUM_ACTIONS; ++action) {
+    if (legal[action]) {
+      probabilities[action] =
+          std::exp((static_cast<double>(decision->logits[action]) - maximum) /
+                   static_cast<double>(temperature));
+    }
+  }
+  std::discrete_distribution<std::size_t> distribution(probabilities.begin(),
+                                                       probabilities.end());
+  decision->action = static_cast<Action>(distribution(generator));
   return decision;
 }
 

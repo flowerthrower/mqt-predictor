@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 
 from mqt.predictor.compiled import ACTION_NAMES, fit_linear_policy, load_training_dataset, target_fingerprint
-from mqt.predictor.compiled.policy import LinearPolicy, parameter_checksum
+from mqt.predictor.compiled.policy import LinearPolicy, export_linear_policy, parameter_checksum
 
 INPUTS = Path(__file__).parents[2] / "cpp" / "test" / "Inputs"
 
@@ -76,3 +76,31 @@ def test_target_fingerprint_rejects_noncanonical_operations(tmp_path: Path, inva
 
     with pytest.raises(ValueError, match="canonical"):
         target_fingerprint(target)
+
+
+def test_export_accepts_runtime_target_fingerprint(tmp_path: Path) -> None:
+    """QDMI training can bind an artifact to a fingerprint reported by C++."""
+    policy = LinearPolicy(
+        np.zeros((len(ACTION_NAMES), 7), dtype=np.float32),
+        np.zeros(len(ACTION_NAMES), dtype=np.float32),
+    )
+    fingerprint = f"sha256:{'a' * 64}"
+    output = tmp_path / "policy.json"
+
+    export_linear_policy(
+        output,
+        policy,
+        target_fingerprint_override=fingerprint,
+        core_revision="core",
+        source_revision="source",
+        algorithm="test",
+        objective="test",
+        samples=1,
+        epochs=1,
+        learning_rate=0.1,
+        l2=0.0,
+        seed=0,
+    )
+
+    artifact = json.loads(output.read_text(encoding="utf-8"))
+    assert artifact["compatibility"]["target_fingerprint"] == fingerprint

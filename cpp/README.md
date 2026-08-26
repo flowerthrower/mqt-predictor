@@ -84,6 +84,30 @@ The exporter records the current Git revision (with `+dirty` when applicable)
 unless `--source-revision` is provided. The same command is available as the
 `Train Native Demo Policy` VS Code task.
 
+## Native pass-ordering RL experiment
+
+The native trainer uses masked episodic REINFORCE. Action sampling and every
+pass transition happen in the compiled MLIR driver; Python only updates and
+exports the 48 parameters of the linear actor between complete compilations.
+Deterministic deployment remains C++-only.
+
+```console
+uv run python -m mqt.predictor.compiled.native_rl bench/*.qasm \
+  --binary build/release/cpp/mqt-predictor-cc \
+  --qdmi-device mqt.sc.iqm.garnet \
+  --max-passes 100 --updates 8 --episodes-per-circuit 2 \
+  --output build/release/native-policy.json \
+  --report build/release/native-policy-report.json
+```
+
+`--max-passes` limits executed transformations; the terminate decision does not
+consume that budget. The reward compares two-qubit depth, two-qubit gates, total
+depth, and total gates with Core's canonical pipeline and charges a small cost
+per pass. The report preserves complete best schedules, repeated-pass counts,
+deterministic evaluation, and the best exhaustive ordering in which each of the
+three optimization passes is used at most once. Circuits without a valid Core
+baseline are listed under `excluded` and are not trained on.
+
 ## Experimental policy contract
 
 Schema `mqt-predictor-bootstrap/1` contains this ordered, clamped seven-float
@@ -125,14 +149,15 @@ contract before they can contribute meaningfully to training.
 
 ## Experiment boundary
 
-The native path currently supports straight-line, scalar-QCO entry points. Each
+The native path currently supports straight-line scalar-QCO entry points and
+statically indexed, straight-line one-dimensional QTensor registers. Each
 completed result is checked with Core's target-conformance verifier. Direct MLIR
 inputs are also checked for exactly-once linear-qubit use; static-site aliases
 are rejected conservatively across the whole module.
 
-Tensor-backed registers, quantum control flow, failed actions, and exhausted
-decision budgets restore the original module and use Core's canonical pipeline.
-The built-in line target remains available through `--target-qubits` for the
-bootstrap and Core policies. Model artifacts are deliberately target-specific; a
-target, Core, schema, ordering, dimension, or checksum mismatch is a hard
-configuration error rather than a silent fallback.
+Dynamic tensor indexing, quantum control flow, failed actions, and exhausted
+transformation budgets restore the original module and use Core's canonical
+pipeline. The built-in line target remains available through `--target-qubits`
+for the bootstrap and Core policies. Model artifacts are deliberately
+target-specific; a target, Core, schema, ordering, dimension, or checksum
+mismatch is a hard configuration error rather than a silent fallback.

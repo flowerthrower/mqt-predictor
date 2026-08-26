@@ -13,6 +13,7 @@
 #include <mlir/Pass/Pass.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -28,6 +29,8 @@ struct PredictorOptions {
   std::string deviceId;
   std::string modelPath;
   bool trace = false;
+  bool samplePolicy = false;
+  std::uint64_t samplingSeed = 0;
 };
 
 [[nodiscard]] std::unique_ptr<::mlir::Pass>

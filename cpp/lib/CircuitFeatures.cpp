@@ -15,10 +15,13 @@
 #include "mlir/Dialect/QCO/IR/QCOInterfaces.h"
 #include "mlir/Dialect/QCO/IR/QCOOps.h"
 #include "mlir/Dialect/QCO/QCOUtils.h"
+#include "mlir/Dialect/QTensor/IR/QTensorOps.h"
 
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/STLExtras.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
+#include <mlir/Dialect/Utils/StaticValueUtils.h>
+#include <mlir/IR/BuiltinTypes.h>
 #include <mlir/IR/Operation.h>
 
 #include <algorithm>
@@ -67,6 +70,8 @@ analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target) {
   }
 
   llvm::DenseMap<Value, WireState> wires;
+  using TensorState = SmallVector<std::optional<WireState>>;
+  llvm::DenseMap<Value, TensorState> tensors;
   std::set<std::pair<std::size_t, std::size_t>> interactions;
   std::set<SiteId> staticSites;
   std::size_t nextLogical = 0;
@@ -121,6 +126,80 @@ analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target) {
       wires[staticQubit.getQubit()] =
           WireState{.logical = nextLogical++, .site = site};
       ++staticRoots;
+      continue;
+    }
+    if (auto alloc = dyn_cast<qtensor::AllocOp>(operation)) {
+      const auto type = dyn_cast<RankedTensorType>(alloc.getResult().getType());
+      if (!type || !type.hasStaticShape() || type.getRank() != 1) {
+        return failure();
+      }
+      const auto size = static_cast<std::size_t>(type.getDimSize(0));
+      TensorState tensor(size);
+      for (auto& wire : tensor) {
+        wire = WireState{.logical = nextLogical++};
+      }
+      tensors[alloc.getResult()] = std::move(tensor);
+      dynamicRoots += size;
+      continue;
+    }
+    if (auto fromElements = dyn_cast<qtensor::FromElementsOp>(operation)) {
+      TensorState tensor;
+      tensor.reserve(fromElements.getElements().size());
+      for (const auto element : fromElements.getElements()) {
+        const auto found = wires.find(element);
+        if (found == wires.end()) {
+          return failure();
+        }
+        tensor.emplace_back(found->second);
+        wires.erase(found);
+      }
+      tensors[fromElements.getResult()] = std::move(tensor);
+      continue;
+    }
+    if (auto extract = dyn_cast<qtensor::ExtractOp>(operation)) {
+      const auto index = getConstantIntValue(extract.getIndex());
+      const auto found = tensors.find(extract.getTensor());
+      if (!index || *index < 0 || found == tensors.end() ||
+          std::cmp_greater_equal(*index, found->second.size())) {
+        return failure();
+      }
+      auto tensor = std::move(found->second);
+      tensors.erase(found);
+      auto& wire = tensor[static_cast<std::size_t>(*index)];
+      if (!wire) {
+        return failure();
+      }
+      wires[extract.getResult()] = *wire;
+      wire.reset();
+      tensors[extract.getOutTensor()] = std::move(tensor);
+      continue;
+    }
+    if (auto insert = dyn_cast<qtensor::InsertOp>(operation)) {
+      const auto index = getConstantIntValue(insert.getIndex());
+      const auto tensorFound = tensors.find(insert.getDest());
+      const auto wireFound = wires.find(insert.getScalar());
+      if (!index || *index < 0 || tensorFound == tensors.end() ||
+          wireFound == wires.end() ||
+          std::cmp_greater_equal(*index, tensorFound->second.size())) {
+        return failure();
+      }
+      auto tensor = std::move(tensorFound->second);
+      tensors.erase(tensorFound);
+      auto& slot = tensor[static_cast<std::size_t>(*index)];
+      if (slot) {
+        return failure();
+      }
+      slot = wireFound->second;
+      wires.erase(wireFound);
+      tensors[insert.getResult()] = std::move(tensor);
+      continue;
+    }
+    if (auto dealloc = dyn_cast<qtensor::DeallocOp>(operation)) {
+      const auto found = tensors.find(dealloc.getTensor());
+      if (found == tensors.end()) {
+        return failure();
+      }
+      tensors.erase(found);
       continue;
     }
     if (auto sink = dyn_cast<SinkOp>(operation)) {
@@ -238,7 +317,7 @@ analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target) {
     }
   }
 
-  if (!wires.empty()) {
+  if (!wires.empty() || !tensors.empty()) {
     return failure();
   }
 
