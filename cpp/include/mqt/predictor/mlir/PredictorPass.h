@@ -25,6 +25,7 @@ struct PredictorOptions {
   std::size_t targetQubits = 5;
   std::size_t maxSteps = 16;
   std::string targetPath;
+  std::string deviceId;
   std::string modelPath;
   bool trace = false;
 };

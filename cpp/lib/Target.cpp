@@ -15,6 +15,7 @@
 #include <llvm/Support/JSON.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/SHA256.h>
+#include <mlir/Compiler/QDMIAdapter.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -232,6 +233,17 @@ loadCompilerTarget(const std::filesystem::path& path) {
   if (!target) {
     const auto detail = llvm::toString(target.takeError());
     return targetError(path, detail);
+  }
+  auto fingerprint = compilerTargetFingerprint(*target);
+  return LoadedCompilerTarget{.target = std::move(*target),
+                              .fingerprint = std::move(fingerprint)};
+}
+
+llvm::Expected<LoadedCompilerTarget>
+loadCompilerTargetFromDevice(const std::string_view deviceId) {
+  auto target = ::mlir::compilerTargetFromDeviceId(deviceId);
+  if (!target) {
+    return target.takeError();
   }
   auto fingerprint = compilerTargetFingerprint(*target);
   return LoadedCompilerTarget{.target = std::move(*target),

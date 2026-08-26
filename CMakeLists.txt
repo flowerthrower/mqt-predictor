@@ -54,7 +54,7 @@ set(BUILD_MQT_CORE_QDMI_DDSIM_DEVICE
     OFF
     CACHE BOOL "Build the MQT Core DDSIM QDMI device" FORCE)
 set(BUILD_MQT_CORE_QDMI_SC_DEVICE
-    OFF
+    ON
     CACHE BOOL "Build the MQT Core superconducting QDMI device" FORCE)
 set(MQT_CORE_INSTALL
     OFF

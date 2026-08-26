@@ -56,6 +56,15 @@ Core's current routing heuristic can produce different layouts across fresh
 processes despite its fixed default seed. Repeat constrained-topology
 measurements; a one-shot difference is not necessarily caused by pass order.
 
+The Core-hosted IQM snapshots are available through their stable QDMI IDs:
+
+```console
+build/release/cpp/mqt-predictor-cc --policy=exhaustive --trace \
+  --qdmi-device=mqt.sc.iqm.garnet input.qasm
+build/release/cpp/mqt-predictor-cc --policy=exhaustive --trace \
+  --qdmi-device=mqt.sc.iqm.emerald input.qasm
+```
+
 ## Minimal trainer/exporter
 
 The checked-in demo uses 20 tiny imitation examples and only 32 full-batch

@@ -48,6 +48,7 @@ void printHelp(llvm::raw_ostream& output) {
          "(default: bootstrap)\n"
          "  --model=<path>        Load a native JSON policy (implies model)\n"
          "  --target=<path>       Load a JSON compiler target\n"
+         "  --qdmi-device=<id>    Snapshot a registered QDMI compiler target\n"
          "  --target-qubits=<n>   Built-in line target size (default: 5)\n"
          "  --max-steps=<n>       Maximum policy decisions (default: 16)\n"
          "  --trace               Print features, states, and actions\n"
@@ -121,6 +122,16 @@ parseSize(const std::string_view value) {
       options.predictor.targetPath = path;
       continue;
     }
+    if (argument.starts_with("--qdmi-device=")) {
+      const auto id =
+          argument.substr(std::string_view("--qdmi-device=").size());
+      if (id.empty()) {
+        llvm::errs() << "--qdmi-device requires an ID\n";
+        return std::nullopt;
+      }
+      options.predictor.deviceId = id;
+      continue;
+    }
     if (argument.starts_with("--target-qubits=")) {
       const auto value =
           argument.substr(std::string_view("--target-qubits=").size());
@@ -171,8 +182,13 @@ parseSize(const std::string_view value) {
     llvm::errs() << "--policy=model requires --model=<path>\n";
     return std::nullopt;
   }
-  if (!options.predictor.targetPath.empty() && options.targetQubitsSpecified) {
-    llvm::errs() << "--target and --target-qubits are mutually exclusive\n";
+  const auto explicitTargets =
+      static_cast<unsigned>(!options.predictor.targetPath.empty()) +
+      static_cast<unsigned>(!options.predictor.deviceId.empty()) +
+      static_cast<unsigned>(options.targetQubitsSpecified);
+  if (explicitTargets > 1) {
+    llvm::errs() << "--target, --qdmi-device, and --target-qubits are mutually "
+                    "exclusive\n";
     return std::nullopt;
   }
   return options;

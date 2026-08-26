@@ -32,6 +32,10 @@ struct LoadedCompilerTarget {
 [[nodiscard]] llvm::Expected<LoadedCompilerTarget>
 loadCompilerTarget(const std::filesystem::path& path);
 
+/** Snapshot a compiler target from a registered QDMI device. */
+[[nodiscard]] llvm::Expected<LoadedCompilerTarget>
+loadCompilerTargetFromDevice(std::string_view deviceId);
+
 /** Construct the built-in line target retained for bootstrap experiments. */
 [[nodiscard]] llvm::Expected<LoadedCompilerTarget>
 createLineTarget(std::size_t size);

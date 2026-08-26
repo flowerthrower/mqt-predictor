@@ -203,9 +203,11 @@ public:
   }
 
   void runOnOperation() final {
-    auto loadedTarget = options_.targetPath.empty()
-                            ? createLineTarget(options_.targetQubits)
-                            : loadCompilerTarget(options_.targetPath);
+    auto loadedTarget = !options_.deviceId.empty()
+                            ? loadCompilerTargetFromDevice(options_.deviceId)
+                        : !options_.targetPath.empty()
+                            ? loadCompilerTarget(options_.targetPath)
+                            : createLineTarget(options_.targetQubits);
     if (!loadedTarget) {
       getOperation().emitError() << llvm::toString(loadedTarget.takeError());
       signalPassFailure();

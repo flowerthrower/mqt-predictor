@@ -25,6 +25,7 @@ add_mlir_library(
   MLIRPass
   MLIRSupport
   MQTCompilerPipeline
+  MQTCompilerQDMIAdapter
   MLIRQCOTransforms)
 
 target_include_directories(
@@ -56,6 +57,12 @@ target_compile_features(mqt-predictor-cc PRIVATE cxx_std_20)
 set_target_properties(mqt-predictor-cc PROPERTIES UNITY_BUILD OFF)
 mqt_mlir_target_use_project_options(mqt-predictor-cc)
 mlir_check_all_link_libraries(mqt-predictor-cc)
+export_executable_symbols_for_plugins(mqt-predictor-cc)
+
+mqt_get_qdmi_device_targets(mqt_predictor_qdmi_device_targets)
+if(mqt_predictor_qdmi_device_targets)
+  mqt_copy_qdmi_runtime(mqt-predictor-cc ${mqt_predictor_qdmi_device_targets})
+endif()
 
 if(BUILD_TESTING)
   add_executable(mqt-predictor-artifact-test test/ArtifactTest.cpp)
@@ -131,6 +138,19 @@ if(BUILD_TESTING)
     mqt-predictor-exhaustive-e2e
     PROPERTIES PASS_REGULAR_EXPRESSION
                "search=exhaustive.*candidates=17;search-result winner="
+               FAIL_REGULAR_EXPRESSION "falling back;error:")
+
+  add_test(
+    NAME mqt-predictor-iqm-garnet-e2e
+    COMMAND
+      mqt-predictor-cc --trace --policy=exhaustive
+      --qdmi-device=mqt.sc.iqm.garnet -o
+      ${CMAKE_CURRENT_BINARY_DIR}/bell-iqm-garnet.mlir
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/bell.qasm)
+  set_tests_properties(
+    mqt-predictor-iqm-garnet-e2e
+    PROPERTIES PASS_REGULAR_EXPRESSION
+               "target=IQM Garnet.*candidates=17;search-result winner="
                FAIL_REGULAR_EXPRESSION "falling back;error:")
 
   add_test(
