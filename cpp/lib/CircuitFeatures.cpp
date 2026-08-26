@@ -287,6 +287,7 @@ analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target) {
   analysis.features = CircuitFeatures{
       .numQubits = numQubits,
       .depth = maxDepth,
+      .twoQubitDepth = twoQubitCriticalDepth,
       .numGates = numGates,
       .numTwoQubitGates = numTwoQubitGates,
       .values = {clampUnit(relativeQubits), clampUnit(normalizedDepth),

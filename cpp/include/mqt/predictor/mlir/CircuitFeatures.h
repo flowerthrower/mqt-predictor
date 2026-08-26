@@ -26,6 +26,7 @@ namespace mqt::predictor::compiler {
 struct CircuitFeatures {
   std::size_t numQubits = 0;
   std::size_t depth = 0;
+  std::size_t twoQubitDepth = 0;
   std::size_t numGates = 0;
   std::size_t numTwoQubitGates = 0;
   FeatureVector values{};

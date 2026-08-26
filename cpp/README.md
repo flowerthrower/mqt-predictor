@@ -41,9 +41,20 @@ build/debug/cpp/mqt-predictor-cc --trace \
   -o build/debug/predicted.mlir cpp/test/Inputs/bell.qasm
 ```
 
-Use `--policy=bootstrap` for the hand-written actor or `--policy=core` for
-Core's canonical target pipeline. `--model` implies `--policy=model`. The driver
-accepts OpenQASM 3 or QCO MLIR and emits QCO MLIR.
+Use `--policy=bootstrap` for the hand-written actor, `--policy=core` for Core's
+canonical target pipeline, or `--policy=exhaustive` for a training-free search.
+`--model` implies `--policy=model`. The driver accepts OpenQASM 3 or QCO MLIR
+and emits QCO MLIR.
+
+The exhaustive mode evaluates Core's canonical pipeline and all 16 ordered
+subsets of the three native optimization actions before the same mapping and
+target-finalization stages. It selects lexicographically by two-qubit critical
+depth, two-qubit gate count, total depth, and total gate count. `--trace`
+reports every candidate, its compile time, and the selected schedule.
+
+Core's current routing heuristic can produce different layouts across fresh
+processes despite its fixed default seed. Repeat constrained-topology
+measurements; a one-shot difference is not necessarily caused by pass order.
 
 ## Minimal trainer/exporter
 

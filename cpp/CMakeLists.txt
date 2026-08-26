@@ -122,6 +122,18 @@ if(BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/bell.qasm)
 
   add_test(
+    NAME mqt-predictor-exhaustive-e2e
+    COMMAND
+      mqt-predictor-cc --trace --policy=exhaustive --target-qubits=4 -o
+      ${CMAKE_CURRENT_BINARY_DIR}/register-exhaustive.mlir
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/register-routing.qasm)
+  set_tests_properties(
+    mqt-predictor-exhaustive-e2e
+    PROPERTIES PASS_REGULAR_EXPRESSION
+               "search=exhaustive.*candidates=17;search-result winner="
+               FAIL_REGULAR_EXPRESSION "falling back;error:")
+
+  add_test(
     NAME mqt-predictor-fallback-e2e
     COMMAND
       mqt-predictor-cc --trace --max-steps=1 --target-qubits=4 -o

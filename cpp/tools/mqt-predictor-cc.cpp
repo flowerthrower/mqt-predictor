@@ -44,8 +44,8 @@ void printHelp(llvm::raw_ostream& output) {
          "\n"
          "Options:\n"
          "  -o <path>             Write QCO MLIR to path (default: stdout)\n"
-         "  --policy=<name>       model, bootstrap, or core (default: "
-         "bootstrap)\n"
+         "  --policy=<name>       exhaustive, model, bootstrap, or core "
+         "(default: bootstrap)\n"
          "  --model=<path>        Load a native JSON policy (implies model)\n"
          "  --target=<path>       Load a JSON compiler target\n"
          "  --target-qubits=<n>   Built-in line target size (default: 5)\n"
@@ -94,6 +94,8 @@ parseSize(const std::string_view value) {
         options.predictor.policy = PolicyMode::Core;
       } else if (policy == "model") {
         options.predictor.policy = PolicyMode::Model;
+      } else if (policy == "exhaustive") {
+        options.predictor.policy = PolicyMode::Exhaustive;
       } else {
         llvm::errs() << "unknown policy: " << policy << '\n';
         return std::nullopt;

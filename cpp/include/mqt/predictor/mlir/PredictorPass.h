@@ -18,7 +18,7 @@
 
 namespace mqt::predictor::compiler {
 
-enum class PolicyMode { Core, Bootstrap, Model };
+enum class PolicyMode { Core, Bootstrap, Model, Exhaustive };
 
 struct PredictorOptions {
   PolicyMode policy = PolicyMode::Bootstrap;
