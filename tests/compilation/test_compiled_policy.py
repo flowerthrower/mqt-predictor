@@ -74,8 +74,7 @@ def test_training_fixture_only_enables_terminate_after_core_stages() -> None:
     place_count = FEATURE_NAMES.index("place-and-route_count")
     synthesis_count = FEATURE_NAMES.index("synthesize-for-target_count")
     assert all(
-        sample["features"][place_count] > 0 and sample["features"][synthesis_count] > 0
-        for sample in terminal_samples
+        sample["features"][place_count] > 0 and sample["features"][synthesis_count] > 0 for sample in terminal_samples
     )
 
 
