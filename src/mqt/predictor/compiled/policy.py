@@ -26,11 +26,12 @@ if TYPE_CHECKING:
 
     from numpy.typing import NDArray
 
-OBSERVATION_SCHEMA = "mqt-predictor-bootstrap/1"
+OBSERVATION_SCHEMA = "mqt-predictor-core-passes/1"
 NATIVE_POLICY_SCHEMA = "mqt-predictor-native-policy/1"
 COMPILER_TARGET_SCHEMA = "mqt-compiler-target/1"
 TARGET_FINGERPRINT_SCHEMA = b"mqt-compiler-target-fingerprint/1"
 TARGET_FINGERPRINT_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
+MAX_PASSES = 100
 
 FEATURE_NAMES = (
     "relative_qubits",
@@ -40,13 +41,17 @@ FEATURE_NAMES = (
     "entanglement_ratio",
     "parallelism",
     "liveness",
+    "step_fraction",
+    "merge-single-qubit-rotation-gates_count",
+    "fuse-single-qubit-unitary-runs_count",
+    "decompose-multi-controlled_count",
+    "hadamard-lifting_count",
 )
 ACTION_NAMES = (
-    "merge-rotations",
-    "fuse-single-qubit",
-    "fuse-two-qubit",
-    "place-and-route",
-    "native-synthesis",
+    "merge-single-qubit-rotation-gates",
+    "fuse-single-qubit-unitary-runs",
+    "decompose-multi-controlled",
+    "hadamard-lifting",
     "terminate",
 )
 
@@ -224,13 +229,13 @@ class LinearPolicy:
         feature_array = np.asarray(features, dtype=np.float32)
         legal_array = np.asarray(legal, dtype=np.bool_)
         if feature_array.shape != (len(FEATURE_NAMES),) or not np.isfinite(feature_array).all():
-            msg = "features must be a finite seven-float vector"
+            msg = f"features must be a finite {len(FEATURE_NAMES)}-float vector"
             raise ValueError(msg)
         if np.any((feature_array < 0) | (feature_array > 1)):
             msg = "features must lie in [0, 1]"
             raise ValueError(msg)
         if legal_array.shape != (len(ACTION_NAMES),) or not legal_array.any():
-            msg = "legal must enable at least one of six actions"
+            msg = f"legal must enable at least one of {len(ACTION_NAMES)} actions"
             raise ValueError(msg)
         logits64 = self.weights.astype(np.float64) @ feature_array.astype(np.float64) + self.bias.astype(np.float64)
         logits = logits64.astype(np.float32)

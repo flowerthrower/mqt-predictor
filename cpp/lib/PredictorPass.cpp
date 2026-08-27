@@ -49,9 +49,12 @@ namespace {
 using Target = ::mlir::CompilerTarget;
 using CandidateScore =
     std::tuple<std::size_t, std::size_t, std::size_t, std::size_t>;
-using ObservationFingerprint =
-    std::tuple<std::size_t, std::size_t, std::size_t, std::size_t, std::size_t,
-               bool, bool, bool, FeatureVector>;
+
+enum class ExhaustiveAction : std::uint8_t {
+  MergeRotations,
+  FuseSingleQubit,
+  FuseTwoQubit,
+};
 
 struct ExhaustiveCandidate {
   ::mlir::OwningOpRef<::mlir::ModuleOp> module;
@@ -71,26 +74,27 @@ struct ExhaustiveCandidate {
   return fingerprint;
 }
 
-[[nodiscard]] ObservationFingerprint
-observationFingerprint(const CircuitAnalysis& analysis) {
-  return {analysis.features.numQubits,
-          analysis.features.depth,
-          analysis.features.twoQubitDepth,
-          analysis.features.numGates,
-          analysis.features.numTwoQubitGates,
-          analysis.state.mapped,
-          analysis.state.routed,
-          analysis.state.synthesized,
-          analysis.features.values};
+[[nodiscard]] std::string_view
+exhaustiveActionName(const ExhaustiveAction action) {
+  switch (action) {
+  case ExhaustiveAction::MergeRotations:
+    return "merge-rotations";
+  case ExhaustiveAction::FuseSingleQubit:
+    return "fuse-single-qubit";
+  case ExhaustiveAction::FuseTwoQubit:
+    return "fuse-two-qubit";
+  }
+  return "unknown";
 }
 
-[[nodiscard]] std::vector<std::vector<Action>>
+[[nodiscard]] std::vector<std::vector<ExhaustiveAction>>
 enumerateOptimizationSchedules() {
-  constexpr std::array optimizations{
-      Action::MergeRotations, Action::FuseSingleQubit, Action::FuseTwoQubit};
-  std::vector<std::vector<Action>> schedules;
+  constexpr std::array optimizations{ExhaustiveAction::MergeRotations,
+                                     ExhaustiveAction::FuseSingleQubit,
+                                     ExhaustiveAction::FuseTwoQubit};
+  std::vector<std::vector<ExhaustiveAction>> schedules;
   for (std::size_t mask = 0; mask < (1U << optimizations.size()); ++mask) {
-    std::vector<Action> selected;
+    std::vector<ExhaustiveAction> selected;
     for (std::size_t index = 0; index < optimizations.size(); ++index) {
       if ((mask & (1U << index)) != 0) {
         selected.emplace_back(optimizations[index]);
@@ -103,7 +107,8 @@ enumerateOptimizationSchedules() {
   return schedules;
 }
 
-[[nodiscard]] std::string scheduleName(const std::vector<Action>& schedule) {
+[[nodiscard]] std::string
+scheduleName(const std::vector<ExhaustiveAction>& schedule) {
   if (schedule.empty()) {
     return "none";
   }
@@ -112,7 +117,7 @@ enumerateOptimizationSchedules() {
     if (!result.empty()) {
       result += '>';
     }
-    result += actionName(action);
+    result += exhaustiveActionName(action);
   }
   return result;
 }
@@ -220,6 +225,13 @@ public:
   }
 
   void runOnOperation() final {
+    if (options_.maxSteps == 0 || options_.maxSteps > MAX_TRANSFORM_PASSES) {
+      getOperation().emitError()
+          << "maximum transformation passes must be between 1 and "
+          << MAX_TRANSFORM_PASSES;
+      signalPassFailure();
+      return;
+    }
     auto loadedTarget = !options_.deviceId.empty()
                             ? loadCompilerTargetFromDevice(options_.deviceId)
                         : !options_.targetPath.empty()
@@ -248,17 +260,17 @@ public:
       return;
     }
 
-    std::optional<LinearPolicyModel> model;
+    std::unique_ptr<PolicyModel> model;
     if (options_.policy == PolicyMode::Model) {
       auto loadedModel =
-          LinearPolicyModel::load(options_.modelPath, loadedTarget->fingerprint,
-                                  MQT_PREDICTOR_CORE_REVISION);
+          loadPolicyModel(options_.modelPath, loadedTarget->fingerprint,
+                          MQT_PREDICTOR_CORE_REVISION);
       if (!loadedModel) {
         getOperation().emitError() << llvm::toString(loadedModel.takeError());
         signalPassFailure();
         return;
       }
-      model.emplace(std::move(*loadedModel));
+      model = std::move(*loadedModel);
     }
 
     auto backup = ::mlir::OwningOpRef<::mlir::ModuleOp>(
@@ -267,7 +279,7 @@ public:
         options_.policy == PolicyMode::Exhaustive
             ? runExhaustive(getOperation(), target, loadedTarget->fingerprint)
             : runBootstrap(getOperation(), target, loadedTarget->fingerprint,
-                           model ? &*model : nullptr);
+                           model.get());
     if (succeeded(result)) {
       if (failed(verifyStaticSites(getOperation(), target)) ||
           failed(verifyLinearQubitStructure(getOperation()))) {
@@ -314,7 +326,7 @@ private:
     }
 
     const auto evaluate = [&](const std::size_t index, const std::string& name,
-                              const std::vector<Action>* schedule) {
+                              const std::vector<ExhaustiveAction>* schedule) {
       auto candidate = ::mlir::cast<::mlir::ModuleOp>(module->clone());
       module.getBody()->push_back(candidate);
       const auto started = std::chrono::steady_clock::now();
@@ -398,21 +410,30 @@ private:
 
   [[nodiscard]] ::mlir::LogicalResult
   runOptimizationSchedule(const ::mlir::ModuleOp module, const Target& target,
-                          const std::vector<Action>& schedule) {
+                          const std::vector<ExhaustiveAction>& schedule) {
     ::mlir::OpPassManager pipeline(::mlir::ModuleOp::getOperationName());
     ::populateQCOCleanupPipeline(pipeline);
     ::populateDecomposeMultiControlledPipeline(pipeline, 3);
     for (const auto action : schedule) {
-      if (failed(populateActionPipeline(pipeline, target, action))) {
-        return ::mlir::failure();
+      switch (action) {
+      case ExhaustiveAction::MergeRotations:
+        pipeline.addPass(::mlir::qco::createMergeSingleQubitRotationGates());
+        break;
+      case ExhaustiveAction::FuseSingleQubit: {
+        ::mlir::qco::FuseSingleQubitUnitaryRunsOptions options;
+        options.basis = "u";
+        pipeline.addPass(
+            ::mlir::qco::createFuseSingleQubitUnitaryRuns(options));
+        break;
+      }
+      case ExhaustiveAction::FuseTwoQubit:
+        pipeline.addPass(::mlir::qco::createFuseTwoQubitGates());
+        break;
       }
     }
-    if (failed(
-            populateActionPipeline(pipeline, target, Action::PlaceAndRoute)) ||
-        failed(populateActionPipeline(pipeline, target,
-                                      Action::NativeSynthesis))) {
-      return ::mlir::failure();
-    }
+    ::populateQCOCleanupPipeline(pipeline);
+    pipeline.addPass(::mlir::qco::createMappingPass(target, {}));
+    populateTargetFinalizationPipeline(pipeline, target);
     pipeline.addPass(::mlir::qco::createVerifyTargetConformance(target));
     return runPipeline(pipeline, module);
   }
@@ -420,19 +441,19 @@ private:
   [[nodiscard]] ::mlir::LogicalResult
   runBootstrap(const ::mlir::ModuleOp module, const Target& target,
                const std::string_view targetFingerprint,
-               const LinearPolicyModel* model) {
-    BootstrapLinearPolicy policy;
-    std::mt19937_64 generator(options_.samplingSeed);
-    std::set<std::pair<ObservationFingerprint, std::size_t>>
-        attemptedTransitions;
-    ::mlir::OpPassManager preparation(::mlir::ModuleOp::getOperationName());
-    ::populateDecomposeMultiControlledPipeline(preparation, 3);
-    if (failed(runPipeline(preparation, module))) {
+               const PolicyModel* model) {
+    ::mlir::OpPassManager cleanup(::mlir::ModuleOp::getOperationName());
+    ::populateQCOCleanupPipeline(cleanup);
+    if (failed(runPipeline(cleanup, module))) {
       return ::mlir::failure();
     }
-    bool needsFinalization = true;
+
+    BootstrapLinearPolicy policy;
+    std::mt19937_64 generator(options_.samplingSeed);
+    std::set<std::pair<std::string, std::size_t>> attemptedTransitions;
+    std::array<std::size_t, actionIndex(Action::Terminate)> actionCounts{};
     for (std::size_t step = 0;;) {
-      const auto analysis = analyzeCircuit(module, target);
+      auto analysis = analyzeCircuit(module, target);
       if (failed(analysis)) {
         if (options_.trace) {
           llvm::errs() << "[mqt-predictor] unsupported QCO structure at step "
@@ -442,11 +463,17 @@ private:
       }
 
       const auto moduleBefore = moduleFingerprint(module);
-      const auto observation = observationFingerprint(*analysis);
+      constexpr auto denominator = static_cast<float>(MAX_TRANSFORM_PASSES);
+      analysis->features.values[7] = static_cast<float>(step) / denominator;
+      for (std::size_t action = 0; action < actionCounts.size(); ++action) {
+        analysis->features.values[8 + action] =
+            static_cast<float>(actionCounts[action]) / denominator;
+      }
       ActionMask suppressed{};
-      for (std::size_t action = 0; action < suppressed.size(); ++action) {
+      for (std::size_t action = 0; action < actionCounts.size(); ++action) {
         suppressed[action] =
-            attemptedTransitions.contains({observation, action});
+            step >= options_.maxSteps ||
+            attemptedTransitions.contains({moduleBefore, action});
       }
       const auto legal = legalActions(analysis->state, suppressed);
       const auto decision =
@@ -461,33 +488,18 @@ private:
       if (decision->action == Action::Terminate) {
         traceDecision(step, *analysis, *decision, target, targetFingerprint,
                       legal, model);
-        if (needsFinalization) {
-          return finalizeForTarget(module, target);
-        }
-        ::mlir::OpPassManager finish(::mlir::ModuleOp::getOperationName());
-        finish.addPass(::mlir::qco::createVerifyTargetConformance(target));
-        return runPipeline(finish, module);
-      }
-      if (step == options_.maxSteps) {
-        if (options_.trace) {
-          llvm::errs() << "[mqt-predictor] exhausted transformation budget="
-                       << options_.maxSteps << '\n';
-        }
-        return ::mlir::failure();
+        return runCorePipeline(module, target);
       }
       traceDecision(step, *analysis, *decision, target, targetFingerprint,
                     legal, model);
 
-      if (failed(runAction(module, target, decision->action))) {
+      if (failed(runAction(module, decision->action))) {
         return ::mlir::failure();
       }
-      attemptedTransitions.emplace(observation, actionIndex(decision->action));
+      const auto selectedAction = actionIndex(decision->action);
+      attemptedTransitions.emplace(moduleBefore, selectedAction);
+      ++actionCounts[selectedAction];
       const auto changed = moduleBefore != moduleFingerprint(module);
-      if (decision->action == Action::NativeSynthesis) {
-        needsFinalization = false;
-      } else if (changed) {
-        needsFinalization = true;
-      }
       if (!changed) {
         if (options_.trace) {
           llvm::errs() << "[mqt-predictor] no-effect action="
@@ -498,62 +510,32 @@ private:
     }
   }
 
-  [[nodiscard]] ::mlir::LogicalResult
-  finalizeForTarget(const ::mlir::ModuleOp module, const Target& target) {
-    ::mlir::OpPassManager cleanup(::mlir::ModuleOp::getOperationName());
-    ::populateQCOCleanupPipeline(cleanup);
-    if (failed(runPipeline(cleanup, module))) {
-      return ::mlir::failure();
-    }
-
-    const auto analysis = analyzeCircuit(module, target);
-    if (failed(analysis)) {
-      return ::mlir::failure();
-    }
-
-    ::mlir::OpPassManager finish(::mlir::ModuleOp::getOperationName());
-    if (!analysis->state.synthesized) {
-      finish.addPass(::mlir::qco::createTargetNativeSynthesis(target));
-    }
-    finish.addPass(::mlir::createCSEPass());
-    finish.addPass(::mlir::createRemoveDeadValuesPass());
-    finish.addPass(::mlir::qco::createVerifyTargetConformance(target));
-    return runPipeline(finish, module);
-  }
-
   [[nodiscard]] ::mlir::LogicalResult runAction(const ::mlir::ModuleOp module,
-                                                const Target& target,
                                                 const Action action) {
     ::mlir::OpPassManager pipeline(::mlir::ModuleOp::getOperationName());
-    if (failed(populateActionPipeline(pipeline, target, action))) {
+    if (failed(populateActionPipeline(pipeline, action))) {
       return ::mlir::failure();
     }
     return runPipeline(pipeline, module);
   }
 
   [[nodiscard]] static ::mlir::LogicalResult
-  populateActionPipeline(::mlir::OpPassManager& pipeline, const Target& target,
-                         const Action action) {
+  populateActionPipeline(::mlir::OpPassManager& pipeline, const Action action) {
     switch (action) {
-    case Action::MergeRotations:
+    case Action::MergeSingleQubitRotationGates:
       pipeline.addPass(::mlir::qco::createMergeSingleQubitRotationGates());
       break;
-    case Action::FuseSingleQubit: {
+    case Action::FuseSingleQubitUnitaryRuns: {
       ::mlir::qco::FuseSingleQubitUnitaryRunsOptions options;
       options.basis = "u";
       pipeline.addPass(::mlir::qco::createFuseSingleQubitUnitaryRuns(options));
       break;
     }
-    case Action::FuseTwoQubit:
-      pipeline.addPass(::mlir::qco::createFuseTwoQubitGates());
+    case Action::DecomposeMultiControlled:
+      ::populateDecomposeMultiControlledPipeline(pipeline, 3);
       break;
-    case Action::PlaceAndRoute: {
-      ::populateQCOCleanupPipeline(pipeline);
-      pipeline.addPass(::mlir::qco::createMappingPass(target, {}));
-      break;
-    }
-    case Action::NativeSynthesis:
-      populateTargetFinalizationPipeline(pipeline, target);
+    case Action::HadamardLifting:
+      pipeline.addPass(::mlir::qco::createHadamardLifting());
       break;
     case Action::Terminate:
     case Action::Count:
@@ -565,8 +547,7 @@ private:
   void traceDecision(const std::size_t step, const CircuitAnalysis& analysis,
                      const Decision& decision, const Target& target,
                      const std::string_view targetFingerprint,
-                     const ActionMask& legal,
-                     const LinearPolicyModel* model) const {
+                     const ActionMask& legal, const PolicyModel* model) const {
     if (!options_.trace) {
       return;
     }
@@ -579,10 +560,12 @@ private:
       if (model == nullptr) {
         llvm::errs() << " objective=none\n";
       } else {
-        llvm::errs() << " model_schema=" << NATIVE_POLICY_SCHEMA
-                     << " artifact_id=" << model->artifactId()
-                     << " parameters_sha256=" << model->parametersChecksum()
-                     << " training=" << model->trainingAlgorithm()
+        llvm::errs() << " model_schema=" << model->schema()
+                     << " artifact_id=" << model->artifactId();
+        if (!model->parametersChecksum().empty()) {
+          llvm::errs() << " parameters_sha256=" << model->parametersChecksum();
+        }
+        llvm::errs() << " training=" << model->trainingAlgorithm()
                      << " objective=" << model->objective() << " sampling="
                      << (options_.samplePolicy ? "stochastic" : "argmax")
                      << " sampling_seed=" << options_.samplingSeed << '\n';

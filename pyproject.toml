@@ -87,6 +87,11 @@ dev = [
     {include-group = "test"},
     "nox>=2025.11.12",
 ]
+compiled = [
+    "mqt-core[qiskit] @ git+https://github.com/munich-quantum-toolkit/core.git@27980b4ec5b2ef6a8ada3629944238f5f66700c2 ; python_version >= '3.11'",
+    "onnx>=1.20.0; python_version >= '3.11'",
+    "onnxruntime>=1.29.0,<1.30; python_version >= '3.11'",
+]
 
 [project.urls]
 Homepage = "https://github.com/munich-quantum-toolkit/predictor"

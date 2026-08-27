@@ -18,20 +18,22 @@
 namespace mqt::predictor::compiler {
 namespace {
 
-// Feature order: relative qubits, normalized depth, communication,
-// critical depth, entanglement ratio, parallelism, and liveness.
 constexpr auto WEIGHTS =
     std::array<std::array<float, NUM_FEATURES>, NUM_ACTIONS>{
-        std::array{0.00F, 1.60F, 0.00F, 0.00F, -0.20F, 0.00F, 0.10F},
-        std::array{0.00F, 1.30F, 0.00F, 0.00F, -0.15F, 0.00F, 0.00F},
-        std::array{0.00F, 0.10F, 0.35F, 0.25F, 0.35F, 0.00F, 0.00F},
-        std::array{0.20F, 0.00F, -0.10F, 0.00F, 0.00F, 0.00F, 0.00F},
-        std::array{0.00F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F},
-        std::array{0.00F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F},
+        std::array{0.00F, 1.60F, 0.00F, 0.00F, -0.20F, 0.00F, 0.10F, 0.00F,
+                   0.00F, 0.00F, 0.00F, 0.00F},
+        std::array{0.00F, 1.30F, 0.00F, 0.00F, -0.15F, 0.00F, 0.00F, 0.00F,
+                   0.00F, 0.00F, 0.00F, 0.00F},
+        std::array{0.00F, 0.10F, 0.35F, 0.25F, 0.35F, 0.00F, 0.00F, 0.00F,
+                   0.00F, 0.00F, 0.00F, 0.00F},
+        std::array{0.00F, 0.00F, 0.20F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F,
+                   0.00F, 0.00F, 0.00F, 0.00F},
+        std::array{0.00F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F,
+                   0.00F, 0.00F, 0.00F, 0.00F},
     };
 
 constexpr auto BIASES =
-    std::array<float, NUM_ACTIONS>{0.05F, 0.05F, 0.05F, 0.35F, 0.20F, 0.00F};
+    std::array<float, NUM_ACTIONS>{0.05F, 0.04F, 0.03F, 0.02F, 0.25F};
 
 [[nodiscard]] constexpr std::size_t index(const Action action) {
   return static_cast<std::size_t>(action);
@@ -50,36 +52,9 @@ std::string_view actionName(const Action action) {
 ActionMask legalActions(const CompilerState& state,
                         const ActionMask& suppressed) {
   ActionMask legal{};
-  const auto enable = [&](const Action action) {
-    const auto actionIndex = index(action);
-    legal[actionIndex] = !suppressed[actionIndex];
-  };
-  const auto enableOptimizations = [&]() {
-    enable(Action::MergeRotations);
-    enable(Action::FuseSingleQubit);
-    enable(Action::FuseTwoQubit);
-  };
-
-  if (!state.mapped) {
-    enableOptimizations();
-    enable(Action::PlaceAndRoute);
-    if (!state.synthesized) {
-      enable(Action::NativeSynthesis);
-    }
-    return legal;
-  }
-
-  if (!state.routed) {
-    return legal;
-  }
-
-  if (state.synthesized) {
-    enable(Action::Terminate);
-    return legal;
-  }
-
-  enableOptimizations();
-  enable(Action::NativeSynthesis);
+  std::transform(suppressed.begin(), suppressed.end(), legal.begin(),
+                 [](const bool isSuppressed) { return !isSuppressed; });
+  legal[index(Action::FuseSingleQubitUnitaryRuns)] &= !state.hasWideUnitary;
   return legal;
 }
 

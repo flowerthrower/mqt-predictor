@@ -9,6 +9,30 @@
 set(MQT_PREDICTOR_MLIR_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 add_compile_definitions(MQT_PREDICTOR_CORE_REVISION="${MQT_CORE_REVISION}")
 
+option(MQT_PREDICTOR_ENABLE_ONNX "Enable ONNX Runtime policy inference" OFF)
+set(ONNXRUNTIME_ROOT
+    ""
+    CACHE PATH "Root of an ONNX Runtime C/C++ SDK")
+if(MQT_PREDICTOR_ENABLE_ONNX)
+  find_path(
+    ONNXRUNTIME_INCLUDE_DIR
+    NAMES onnxruntime_c_api.h
+    PATHS "${ONNXRUNTIME_ROOT}/include"
+    NO_DEFAULT_PATH REQUIRED)
+  find_library(
+    ONNXRUNTIME_LIBRARY
+    NAMES onnxruntime
+    PATHS "${ONNXRUNTIME_ROOT}/lib"
+    NO_DEFAULT_PATH REQUIRED)
+  if(NOT TARGET onnxruntime::onnxruntime)
+    add_library(onnxruntime::onnxruntime UNKNOWN IMPORTED GLOBAL)
+    set_target_properties(
+      onnxruntime::onnxruntime
+      PROPERTIES IMPORTED_LOCATION "${ONNXRUNTIME_LIBRARY}"
+                 INTERFACE_INCLUDE_DIRECTORIES "${ONNXRUNTIME_INCLUDE_DIR}")
+  endif()
+endif()
+
 add_mlir_library(
   MQTPredictorMLIR
   DISABLE_INSTALL
@@ -47,8 +71,17 @@ target_sources(
 target_compile_features(MQTPredictorMLIR PUBLIC cxx_std_20)
 set_target_properties(MQTPredictorMLIR PROPERTIES UNITY_BUILD OFF)
 mqt_mlir_target_use_project_options(MQTPredictorMLIR)
+if(MQT_PREDICTOR_ENABLE_ONNX)
+  target_compile_definitions(MQTPredictorMLIR
+                             PRIVATE MQT_PREDICTOR_ENABLE_ONNX=1)
+  target_link_libraries(MQTPredictorMLIR PRIVATE onnxruntime::onnxruntime)
+endif()
 if(TARGET obj.MQTPredictorMLIR)
   set_target_properties(obj.MQTPredictorMLIR PROPERTIES UNITY_BUILD OFF)
+  if(MQT_PREDICTOR_ENABLE_ONNX)
+    target_compile_definitions(obj.MQTPredictorMLIR
+                               PRIVATE MQT_PREDICTOR_ENABLE_ONNX=1)
+  endif()
 endif()
 
 add_executable(mqt-predictor-cc tools/mqt-predictor-cc.cpp)
@@ -99,6 +132,23 @@ if(BUILD_TESTING)
     PROPERTIES PASS_REGULAR_EXPRESSION "policy=model.*action=terminate"
                FAIL_REGULAR_EXPRESSION "falling back;error:")
 
+  if(MQT_PREDICTOR_ENABLE_ONNX)
+    add_test(
+      NAME mqt-predictor-onnx-model-e2e
+      COMMAND
+        mqt-predictor-cc --trace
+        --target=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-target.json
+        --model=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-policy.onnx -o
+        ${CMAKE_CURRENT_BINARY_DIR}/bell-onnx-model.mlir
+        ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/bell.qasm)
+    set_tests_properties(
+      mqt-predictor-onnx-model-e2e
+      PROPERTIES
+        PASS_REGULAR_EXPRESSION
+        "policy=model model_schema=mqt-predictor-onnx-policy/1.*action=terminate"
+        FAIL_REGULAR_EXPRESSION "falling back;error:")
+  endif()
+
   add_test(
     NAME mqt-predictor-register-model-e2e
     COMMAND
@@ -120,8 +170,10 @@ if(BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/bell.qasm)
   set_tests_properties(
     mqt-predictor-bootstrap-e2e
-    PROPERTIES PASS_REGULAR_EXPRESSION "action=terminate"
-               FAIL_REGULAR_EXPRESSION "falling back;error:")
+    PROPERTIES
+      PASS_REGULAR_EXPRESSION
+      "step=0.*features=\\{relative_qubits=7[.]500000e-01,log_depth=1[.]408497e-01,program_communication=1[.]000000e[+]00,critical_depth=1[.]000000e[+]00,entanglement_ratio=6[.]000000e-01,parallelism=0[.]000000e[+]00,liveness=6[.]111111e-01,step_fraction=0[.]000000e[+]00,merge-single-qubit-rotation-gates_count=0[.]000000e[+]00,fuse-single-qubit-unitary-runs_count=0[.]000000e[+]00,decompose-multi-controlled_count=0[.]000000e[+]00,hadamard-lifting_count=0[.]000000e[+]00\\}"
+      FAIL_REGULAR_EXPRESSION "falling back;error:")
 
   add_test(
     NAME mqt-predictor-rotations-e2e
@@ -131,8 +183,31 @@ if(BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/rotations.qasm)
   set_tests_properties(
     mqt-predictor-rotations-e2e
-    PROPERTIES PASS_REGULAR_EXPRESSION "action=merge-rotations"
-               FAIL_REGULAR_EXPRESSION "falling back;error:")
+    PROPERTIES
+      PASS_REGULAR_EXPRESSION "action=merge-single-qubit-rotation-gates"
+      FAIL_REGULAR_EXPRESSION "falling back;error:")
+
+  add_test(
+    NAME mqt-predictor-wide-e2e
+    COMMAND
+      mqt-predictor-cc --trace --max-steps=1 --target-qubits=4 -o
+      ${CMAKE_CURRENT_BINARY_DIR}/wide-bootstrap.mlir
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/wide.qasm)
+  set_tests_properties(
+    mqt-predictor-wide-e2e
+    PROPERTIES PASS_REGULAR_EXPRESSION "schema=mqt-predictor-core-passes/1"
+               FAIL_REGULAR_EXPRESSION "unsupported QCO structure;falling back;error:")
+
+  add_test(
+    NAME mqt-predictor-qft-feature-e2e
+    COMMAND
+      mqt-predictor-cc --trace --max-steps=1 --target-qubits=4 -o
+      ${CMAKE_CURRENT_BINARY_DIR}/qft-feature.mlir
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/qft-4.qasm)
+  set_tests_properties(
+    mqt-predictor-qft-feature-e2e
+    PROPERTIES PASS_REGULAR_EXPRESSION "critical_depth=7[.]500000e-01"
+               FAIL_REGULAR_EXPRESSION "unsupported QCO structure;falling back;error:")
 
   add_test(
     NAME mqt-predictor-core-e2e
@@ -167,14 +242,22 @@ if(BUILD_TESTING)
                FAIL_REGULAR_EXPRESSION "falling back;error:")
 
   add_test(
-    NAME mqt-predictor-fallback-e2e
+    NAME mqt-predictor-budget-termination-e2e
     COMMAND
       mqt-predictor-cc --trace --max-steps=1 --target-qubits=4 -o
       ${CMAKE_CURRENT_BINARY_DIR}/bell-fallback.mlir
       ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/bell.qasm)
   set_tests_properties(
-    mqt-predictor-fallback-e2e PROPERTIES PASS_REGULAR_EXPRESSION
-                                              "exhausted transformation budget=1")
+    mqt-predictor-budget-termination-e2e
+    PROPERTIES PASS_REGULAR_EXPRESSION "step=1 action=terminate"
+               FAIL_REGULAR_EXPRESSION "falling back;error:")
+
+  add_test(
+    NAME mqt-predictor-rejects-pass-budget
+    COMMAND mqt-predictor-cc --max-steps=101
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/bell.qasm)
+  set_tests_properties(mqt-predictor-rejects-pass-budget PROPERTIES WILL_FAIL
+                                                                       TRUE)
 
   add_test(
     NAME mqt-predictor-rejects-duplicate-sites

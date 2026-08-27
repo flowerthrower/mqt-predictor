@@ -84,6 +84,7 @@ analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target) {
   std::size_t activity = 0;
   bool routed = true;
   bool synthesized = true;
+  bool hasWideUnitary = false;
 
   const auto recordDepth = [&](const WireState& wire) {
     if (wire.depth > maxDepth ||
@@ -227,7 +228,7 @@ analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target) {
       }
 
       const auto arity = unitary.getNumQubits();
-      if (arity == 0 || arity > 2 || operation.getNumRegions() > 1) {
+      if (arity == 0 || operation.getNumRegions() > 1) {
         return failure();
       }
 
@@ -249,6 +250,7 @@ analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target) {
       ++operationDepth;
 
       const auto isTwoQubit = arity == 2;
+      hasWideUnitary |= arity > 2;
       ++numGates;
       numTwoQubitGates += static_cast<std::size_t>(isTwoQubit);
       activity += arity;
@@ -374,7 +376,10 @@ analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target) {
                  clampUnit(entanglement), clampUnit(parallelism),
                  clampUnit(liveness)}};
   analysis.state = CompilerState{
-      .mapped = mapped, .routed = routed, .synthesized = synthesized};
+      .mapped = mapped,
+      .routed = routed,
+      .synthesized = synthesized,
+      .hasWideUnitary = hasWideUnitary};
   return analysis;
 }
 

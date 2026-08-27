@@ -9,6 +9,7 @@
  */
 
 #include "mlir/Compiler/Programs.h"
+#include "mqt/predictor/mlir/Policy.h"
 #include "mqt/predictor/mlir/PredictorPass.h"
 
 #include <llvm/Support/InitLLVM.h>
@@ -29,6 +30,7 @@ namespace {
 
 using mqt::predictor::compiler::PolicyMode;
 using mqt::predictor::compiler::PredictorOptions;
+using mqt::predictor::compiler::MAX_TRANSFORM_PASSES;
 
 struct DriverOptions {
   std::filesystem::path input;
@@ -46,11 +48,12 @@ void printHelp(llvm::raw_ostream& output) {
          "  -o <path>             Write QCO MLIR to path (default: stdout)\n"
          "  --policy=<name>       exhaustive, model, bootstrap, or core "
          "(default: bootstrap)\n"
-         "  --model=<path>        Load a native JSON policy (implies model)\n"
+         "  --model=<path>        Load a JSON or enabled ONNX policy "
+         "(implies model)\n"
          "  --target=<path>       Load a JSON compiler target\n"
          "  --qdmi-device=<id>    Snapshot a registered QDMI compiler target\n"
          "  --target-qubits=<n>   Built-in line target size (default: 5)\n"
-         "  --max-steps=<n>       Maximum transformation passes (default: 16)\n"
+         "  --max-steps=<n>       Maximum transformation passes (default: 100)\n"
          "  --sample-policy       Sample model actions for RL training\n"
          "  --sampling-seed=<n>   Seed for sampled model actions (default: 0)\n"
          "  --trace               Print features, states, and actions\n"
@@ -154,8 +157,9 @@ parseSize(const std::string_view value) {
       const auto value =
           argument.substr(std::string_view("--max-steps=").size());
       const auto parsed = parseSize(value);
-      if (!parsed || *parsed == 0) {
-        llvm::errs() << "--max-steps must be positive\n";
+      if (!parsed || *parsed == 0 || *parsed > MAX_TRANSFORM_PASSES) {
+        llvm::errs() << "--max-steps must be between 1 and "
+                     << MAX_TRANSFORM_PASSES << '\n';
         return std::nullopt;
       }
       options.predictor.maxSteps = *parsed;

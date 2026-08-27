@@ -4,7 +4,6 @@
 !.idea/runConfigurations
 !.idea/cmake.xml
 .vscode/*
-!.vscode/tasks.json
 *~
 
 __pycache__/
@@ -30,6 +29,7 @@ var/
 
 .cache/
 .pytest_cache/
+:memory:.ses
 .coverage
 .coverage*
 .tox

@@ -24,7 +24,7 @@ enum class PolicyMode { Core, Bootstrap, Model, Exhaustive };
 struct PredictorOptions {
   PolicyMode policy = PolicyMode::Bootstrap;
   std::size_t targetQubits = 5;
-  std::size_t maxSteps = 16;
+  std::size_t maxSteps = 100;
   std::string targetPath;
   std::string deviceId;
   std::string modelPath;

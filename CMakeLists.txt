@@ -35,11 +35,13 @@ set(CMAKE_CXX_EXTENSIONS ON)
 include(FetchContent)
 
 set(MQT_CORE_REVISION
-    "0c50dd30815638517aa159d20e78290cd449323e"
+    "27980b4ec5b2ef6a8ada3629944238f5f66700c2"
     CACHE INTERNAL "MQT Core revision used by the experimental MLIR predictor" FORCE)
 set(MQT_CORE_SOURCE_DIR
     "$ENV{MQT_CORE_SOURCE_DIR}"
     CACHE PATH "Optional local MQT Core source directory")
+set(MQT_CORE_MAPPING_PATCH
+    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/patches/mqt-core-ready-block-order.patch")
 
 set(BUILD_MQT_CORE_TESTS
     OFF
@@ -81,14 +83,27 @@ if(MQT_CORE_SOURCE_DIR)
       FATAL_ERROR
         "MQT_CORE_SOURCE_DIR must be a Git checkout at ${MQT_CORE_REVISION}; found '${MQT_CORE_SOURCE_REVISION}'")
   endif()
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" -C "${MQT_CORE_SOURCE_DIR}" apply --reverse
+            --check "${MQT_CORE_MAPPING_PATCH}"
+    RESULT_VARIABLE MQT_CORE_PATCH_RESULT
+    ERROR_QUIET)
+  if(NOT MQT_CORE_PATCH_RESULT EQUAL 0)
+    message(
+      FATAL_ERROR
+        "MQT_CORE_SOURCE_DIR must include ${MQT_CORE_MAPPING_PATCH}; apply it before configuring")
+  endif()
   unset(MQT_CORE_GIT_RESULT)
+  unset(MQT_CORE_PATCH_RESULT)
   unset(MQT_CORE_SOURCE_REVISION)
   FetchContent_Declare(mqt-core SOURCE_DIR "${MQT_CORE_SOURCE_DIR}")
 else()
+  find_package(Git REQUIRED)
   FetchContent_Declare(
     mqt-core
     GIT_REPOSITORY https://github.com/munich-quantum-toolkit/core.git
-    GIT_TAG ${MQT_CORE_REVISION})
+    GIT_TAG ${MQT_CORE_REVISION}
+    PATCH_COMMAND "${GIT_EXECUTABLE}" apply "${MQT_CORE_MAPPING_PATCH}")
 endif()
 
 FetchContent_MakeAvailable(mqt-core)

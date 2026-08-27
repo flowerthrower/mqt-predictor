@@ -6,7 +6,7 @@
 #
 # Licensed under the MIT License
 
-"""Deterministic masked-softmax trainer for the native linear actor."""
+"""Imitation and MaskablePPO training helpers for the compiled actor."""
 
 from __future__ import annotations
 
@@ -21,6 +21,10 @@ from .policy import ACTION_NAMES, FEATURE_NAMES, LinearPolicy
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
+
+    from gymnasium import Env
+    from sb3_contrib import MaskablePPO
+    from torch import Tensor
 
 
 TRAINING_DATASET_SCHEMA = "mqt-predictor-native-dataset/1"
@@ -39,13 +43,16 @@ class TrainingExample:
         """Validate the feature, mask, label, and sample weight."""
         features = np.asarray(self.features, dtype=np.float64)
         if features.shape != (len(FEATURE_NAMES),) or not np.isfinite(features).all():
-            msg = "training features must be a finite seven-float vector"
+            msg = f"training features must be a finite {len(FEATURE_NAMES)}-float vector"
             raise ValueError(msg)
         if np.any((features < 0) | (features > 1)):
             msg = "training features must lie in [0, 1]"
             raise ValueError(msg)
         if len(self.legal) != len(ACTION_NAMES) or not any(self.legal):
-            msg = "training mask must enable at least one of six actions"
+            msg = f"training mask must enable at least one of {len(ACTION_NAMES)} actions"
+            raise ValueError(msg)
+        if not self.legal[-1]:
+            msg = "training mask must keep terminate legal"
             raise ValueError(msg)
         if not 0 <= self.action < len(ACTION_NAMES) or not self.legal[self.action]:
             msg = "training action must be enabled by its mask"
@@ -62,6 +69,52 @@ class TrainingResult:
     policy: LinearPolicy
     loss: float
     accuracy: float
+
+
+def extract_maskable_ppo_policy(model: MaskablePPO) -> LinearPolicy:
+    """Extract the direct linear actor from a MaskablePPO model."""
+    policy = model.policy
+    if len(policy.mlp_extractor.policy_net) != 0:
+        msg = "MaskablePPO policy actor must not contain hidden layers"
+        raise ValueError(msg)
+    action_net = policy.action_net
+    weights = cast("Tensor", action_net.weight).detach().cpu().numpy()
+    bias = cast("Tensor", action_net.bias).detach().cpu().numpy()
+    return LinearPolicy(weights=np.asarray(weights, dtype=np.float32), bias=np.asarray(bias, dtype=np.float32))
+
+
+def train_maskable_ppo(
+    env: Env,
+    *,
+    timesteps: int = 2,
+    seed: int = 7,
+) -> LinearPolicy:
+    """Train the smallest MaskablePPO actor that matches the compiled ABI."""
+    if timesteps < 2 or seed < 0:
+        msg = "MaskablePPO training parameters are invalid"
+        raise ValueError(msg)
+    if env.observation_space.shape != (len(FEATURE_NAMES),) or getattr(env.action_space, "n", None) != len(
+        ACTION_NAMES
+    ):
+        msg = "training environment does not match the compiled policy ABI"
+        raise ValueError(msg)
+
+    from sb3_contrib import MaskablePPO  # ruff: ignore[import-outside-top-level]
+
+    model = MaskablePPO(
+        "MlpPolicy",
+        env,
+        n_steps=timesteps,
+        batch_size=timesteps,
+        n_epochs=1,
+        gamma=0.98,
+        policy_kwargs={"net_arch": {"pi": [], "vf": []}},
+        verbose=0,
+        seed=seed,
+        device="cpu",
+    )
+    model.learn(total_timesteps=timesteps, progress_bar=False)
+    return extract_maskable_ppo_policy(model)
 
 
 def _object(value: object, context: str) -> dict[str, Any]:
@@ -85,8 +138,12 @@ def load_training_dataset(path: Path) -> list[TrainingExample]:
     except (OSError, json.JSONDecodeError) as error:
         msg = f"failed to read training dataset: {path}"
         raise ValueError(msg) from error
-    if set(root) != {"schema", "feature_names", "action_names", "samples"}:
+    required_fields = {"schema", "feature_names", "action_names", "samples"}
+    if not required_fields <= set(root) or set(root) - required_fields - {"purpose"}:
         msg = "training dataset fields do not match the native schema"
+        raise ValueError(msg)
+    if "purpose" in root and (not isinstance(root["purpose"], str) or not root["purpose"]):
+        msg = "training dataset purpose must be a nonempty string"
         raise ValueError(msg)
     if root["schema"] != TRAINING_DATASET_SCHEMA or tuple(root["feature_names"]) != FEATURE_NAMES:
         msg = "training observation schema does not match the native ABI"

@@ -10,17 +10,33 @@
 
 from __future__ import annotations
 
+from .core_env import CorePredictorEnv
+from .onnx_policy import ONNX_POLICY_SCHEMA, OnnxPolicy, export_onnx_policy, load_onnx_policy
 from .policy import ACTION_NAMES, FEATURE_NAMES, LinearPolicy, export_linear_policy, target_fingerprint
-from .trainer import TrainingExample, TrainingResult, fit_linear_policy, load_training_dataset
+from .trainer import (
+    TrainingExample,
+    TrainingResult,
+    extract_maskable_ppo_policy,
+    fit_linear_policy,
+    load_training_dataset,
+    train_maskable_ppo,
+)
 
 __all__ = [
     "ACTION_NAMES",
     "FEATURE_NAMES",
+    "ONNX_POLICY_SCHEMA",
+    "CorePredictorEnv",
     "LinearPolicy",
+    "OnnxPolicy",
     "TrainingExample",
     "TrainingResult",
     "export_linear_policy",
+    "export_onnx_policy",
+    "extract_maskable_ppo_policy",
     "fit_linear_policy",
+    "load_onnx_policy",
     "load_training_dataset",
     "target_fingerprint",
+    "train_maskable_ppo",
 ]

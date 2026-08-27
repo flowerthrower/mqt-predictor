@@ -15,8 +15,17 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from gymnasium import Env
+from gymnasium.spaces import Box, Discrete
 
-from mqt.predictor.compiled import ACTION_NAMES, fit_linear_policy, load_training_dataset, target_fingerprint
+from mqt.predictor.compiled import (
+    ACTION_NAMES,
+    FEATURE_NAMES,
+    fit_linear_policy,
+    load_training_dataset,
+    target_fingerprint,
+    train_maskable_ppo,
+)
 from mqt.predictor.compiled.policy import LinearPolicy, export_linear_policy, parameter_checksum
 
 INPUTS = Path(__file__).parents[2] / "cpp" / "test" / "Inputs"
@@ -24,7 +33,10 @@ INPUTS = Path(__file__).parents[2] / "cpp" / "test" / "Inputs"
 
 def test_minimal_training_is_deterministic() -> None:
     """The 32-step smoke training run is reproducible."""
+    dataset = json.loads((INPUTS / "line-4-training.json").read_text(encoding="utf-8"))
+    assert dataset["purpose"] == "synthetic serialization and imitation-training smoke; not compiler trajectory data"
     examples = load_training_dataset(INPUTS / "line-4-training.json")
+    assert all(example.legal[-1] for example in examples)
     first = fit_linear_policy(examples)
     second = fit_linear_policy(examples)
 
@@ -43,15 +55,16 @@ def test_checked_in_artifact_matches_python_contract() -> None:
     assert artifact["compatibility"]["target_fingerprint"] == target_fingerprint(INPUTS / "line-4-target.json")
     assert artifact["parameters_sha256"] == parameter_checksum(weights, bias)
     assert artifact["training"]["epochs"] == 32
+    assert artifact["training"]["objective"] == "synthetic serialization and imitation-training smoke"
 
 
 def test_policy_masks_illegal_actions() -> None:
     """Masked actions cannot win native inference."""
-    weights = np.zeros((len(ACTION_NAMES), 7), dtype=np.float32)
+    weights = np.zeros((len(ACTION_NAMES), len(FEATURE_NAMES)), dtype=np.float32)
     bias = np.arange(len(ACTION_NAMES), dtype=np.float32)
     policy = LinearPolicy(weights, bias)
 
-    selected, logits = policy.select([0.5] * 7, [True, True, False, False, False, False])
+    selected, logits = policy.select([0.5] * len(FEATURE_NAMES), [True, True, False, False, False])
 
     assert selected == 1
     assert np.isneginf(logits[2:]).all()
@@ -63,7 +76,15 @@ def test_training_rejects_illegal_label() -> None:
     example = examples[0]
 
     with pytest.raises(ValueError, match="enabled"):
-        type(example)(features=example.features, legal=(False, True, False, False, False, False), action=0)
+        type(example)(features=example.features, legal=(False, True, False, False, True), action=0)
+
+
+def test_training_requires_terminate_to_remain_legal() -> None:
+    """Imitation masks follow the runtime's always-legal terminate contract."""
+    example = load_training_dataset(INPUTS / "line-4-training.json")[0]
+
+    with pytest.raises(ValueError, match="keep terminate legal"):
+        type(example)(features=example.features, legal=(True, True, True, True, False), action=0)
 
 
 @pytest.mark.parametrize("invalid_operation", ["cnot", "U", " cx "])
@@ -81,7 +102,7 @@ def test_target_fingerprint_rejects_noncanonical_operations(tmp_path: Path, inva
 def test_export_accepts_runtime_target_fingerprint(tmp_path: Path) -> None:
     """QDMI training can bind an artifact to a fingerprint reported by C++."""
     policy = LinearPolicy(
-        np.zeros((len(ACTION_NAMES), 7), dtype=np.float32),
+        np.zeros((len(ACTION_NAMES), len(FEATURE_NAMES)), dtype=np.float32),
         np.zeros(len(ACTION_NAMES), dtype=np.float32),
     )
     fingerprint = f"sha256:{'a' * 64}"
@@ -104,3 +125,36 @@ def test_export_accepts_runtime_target_fingerprint(tmp_path: Path) -> None:
 
     artifact = json.loads(output.read_text(encoding="utf-8"))
     assert artifact["compatibility"]["target_fingerprint"] == fingerprint
+
+
+class _MinimalMaskedEnv(Env):
+    """Two-step environment for checking the deployable actor shape."""
+
+    observation_space = Box(0.0, 1.0, shape=(len(FEATURE_NAMES),), dtype=np.float32)
+    action_space = Discrete(len(ACTION_NAMES))
+
+    def reset(
+        self,
+        *,
+        seed: int | None = None,
+        options: dict[str, object] | None = None,
+    ) -> tuple[np.ndarray, dict[str, object]]:
+        super().reset(seed=seed, options=options)
+        return np.zeros(len(FEATURE_NAMES), dtype=np.float32), {}
+
+    def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, object]]:
+        observation = np.full(len(FEATURE_NAMES), 0.5, dtype=np.float32)
+        return observation, float(action == 0), True, False, {}
+
+    def action_masks(self) -> list[bool]:
+        return [True] * len(ACTION_NAMES)
+
+
+def test_maskable_ppo_trains_deployable_linear_actor() -> None:
+    """Minimal PPO training returns the exact compiled actor dimensions."""
+    policy = train_maskable_ppo(_MinimalMaskedEnv(), timesteps=2, seed=7)
+
+    assert policy.weights.shape == (len(ACTION_NAMES), len(FEATURE_NAMES))
+    assert policy.bias.shape == (len(ACTION_NAMES),)
+    assert np.isfinite(policy.weights).all()
+    assert np.isfinite(policy.bias).all()

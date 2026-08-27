@@ -19,22 +19,31 @@
 namespace mqt::predictor::compiler {
 
 inline constexpr std::string_view EXPERIMENT_SCHEMA =
-    "mqt-predictor-bootstrap/1";
-inline constexpr std::size_t NUM_FEATURES = 7;
+    "mqt-predictor-core-passes/1";
+inline constexpr std::size_t NUM_FEATURES = 12;
 inline constexpr std::array<std::string_view, NUM_FEATURES> FEATURE_NAMES{
-    "relative_qubits", "log_depth",          "program_communication",
-    "critical_depth",  "entanglement_ratio", "parallelism",
-    "liveness"};
+    "relative_qubits",
+    "log_depth",
+    "program_communication",
+    "critical_depth",
+    "entanglement_ratio",
+    "parallelism",
+    "liveness",
+    "step_fraction",
+    "merge-single-qubit-rotation-gates_count",
+    "fuse-single-qubit-unitary-runs_count",
+    "decompose-multi-controlled_count",
+    "hadamard-lifting_count"};
 inline constexpr double DEPTH_NORMALIZATION_MAX = 1'000'000.0;
+inline constexpr std::size_t MAX_TRANSFORM_PASSES = 100;
 
 using FeatureVector = std::array<float, NUM_FEATURES>;
 
 enum class Action : std::uint8_t {
-  MergeRotations,
-  FuseSingleQubit,
-  FuseTwoQubit,
-  PlaceAndRoute,
-  NativeSynthesis,
+  MergeSingleQubitRotationGates,
+  FuseSingleQubitUnitaryRuns,
+  DecomposeMultiControlled,
+  HadamardLifting,
   Terminate,
   Count,
 };
@@ -42,14 +51,15 @@ enum class Action : std::uint8_t {
 inline constexpr std::size_t NUM_ACTIONS =
     static_cast<std::size_t>(Action::Count);
 inline constexpr std::array<std::string_view, NUM_ACTIONS> ACTION_NAMES{
-    "merge-rotations", "fuse-single-qubit", "fuse-two-qubit",
-    "place-and-route", "native-synthesis",  "terminate"};
+    "merge-single-qubit-rotation-gates", "fuse-single-qubit-unitary-runs",
+    "decompose-multi-controlled", "hadamard-lifting", "terminate"};
 using ActionMask = std::array<bool, NUM_ACTIONS>;
 
 struct CompilerState {
   bool mapped = false;
   bool routed = false;
   bool synthesized = false;
+  bool hasWideUnitary = false;
 };
 
 struct Decision {
@@ -60,11 +70,10 @@ struct Decision {
 [[nodiscard]] std::string_view actionName(Action action);
 
 /**
- * Return the legal action mask for the bootstrap experiment.
+ * Return the legal action mask for the Core-only pass-ordering experiment.
  *
- * The MLIR mapping pass performs placement and routing atomically.
- * Consequently, this experiment collapses Predictor v3's separate layout and
- * routing stages into one placed-and-routed state.
+ * Fusion is ineligible while the circuit contains a unitary on more than two
+ * qubits. Other actions are eligible unless suppressed by the caller.
  */
 [[nodiscard]] ActionMask legalActions(const CompilerState& state,
                                       const ActionMask& suppressed);
