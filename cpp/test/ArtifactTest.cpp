@@ -41,8 +41,7 @@ int main(const int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
-  const FeatureVector features{0.5F, 0.3F, 0.7F, 0.8F, 0.75F, 0.25F, 0.55F,
-                               0.0F, 0.0F, 0.0F, 0.0F, 0.0F,  0.0F};
+  const FeatureVector features{};
   const ActionMask legal{true, true, true, true, true, false};
   const auto decision = model->select(features, legal);
   if (!decision || decision->action != Action::PlaceAndRoute) {

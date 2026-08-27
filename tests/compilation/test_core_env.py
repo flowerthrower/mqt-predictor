@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -171,12 +172,12 @@ def compiler(monkeypatch: pytest.MonkeyPatch) -> _FakeCompiler:
     return fake
 
 
-def _environment(circuits: Sequence[QuantumCircuit], *, max_passes: int = 100) -> CorePredictorEnv:
+def _environment(circuits: Sequence[QuantumCircuit], *, max_passes: int = 20) -> CorePredictorEnv:
     return CorePredictorEnv(circuits, _FakeTarget(), max_passes=max_passes)
 
 
 def test_core_environment_has_compact_stable_abi(bell: QuantumCircuit, compiler: _FakeCompiler) -> None:
-    """The Core environment exposes six actions and thirteen bounded floats."""
+    """The Core environment exposes six actions and the v3 flat observation."""
     env = _environment([bell])
 
     observation, info = env.reset(seed=7)
@@ -190,13 +191,56 @@ def test_core_environment_has_compact_stable_abi(bell: QuantumCircuit, compiler:
         "terminate",
     )
     assert FEATURE_NAMES == (
-        "relative_qubits",
-        "log_depth",
-        "program_communication",
+        "c3sqrtx",
+        "c3x",
+        "c4x",
+        "ccx",
+        "ch",
+        "cp",
         "critical_depth",
+        "crx",
+        "cry",
+        "crz",
+        "cswap",
+        "csx",
+        "cu",
+        "cu1",
+        "cu3",
+        "cx",
+        "cy",
+        "cz",
+        "depth",
         "entanglement_ratio",
-        "parallelism",
+        "h",
+        "id",
         "liveness",
+        "measure",
+        "num_qubits",
+        "p",
+        "parallelism",
+        "program_communication",
+        "rc3x",
+        "rccx",
+        "rx",
+        "rxx",
+        "ry",
+        "rz",
+        "rzz",
+        "s",
+        "sdg",
+        "swap",
+        "sx",
+        "sxdg",
+        "t",
+        "tdg",
+        "u",
+        "u0",
+        "u1",
+        "u2",
+        "u3",
+        "x",
+        "y",
+        "z",
         "step_fraction",
         "merge-single-qubit-rotation-gates_count",
         "fuse-single-qubit-unitary-runs_count",
@@ -208,6 +252,11 @@ def test_core_environment_has_compact_stable_abi(bell: QuantumCircuit, compiler:
     assert env.action_space.n == len(ACTION_NAMES)
     assert env.observation_space.contains(observation)
     assert observation.dtype == np.float32
+    assert observation[FEATURE_NAMES.index("h")] == pytest.approx(0.25)
+    assert observation[FEATURE_NAMES.index("cx")] == pytest.approx(0.25)
+    assert observation[FEATURE_NAMES.index("measure")] == pytest.approx(0.5)
+    assert observation[FEATURE_NAMES.index("num_qubits")] == pytest.approx(0.5)
+    assert observation[FEATURE_NAMES.index("depth")] == pytest.approx(math.log1p(3) / math.log1p(999_999))
     assert env.action_masks() == [True, True, True, True, True, False]
     assert info["circuit_index"] == 0
     assert info["potential"] == pytest.approx(0.0)
@@ -236,10 +285,26 @@ def test_actions_keep_one_persistent_qco_state(bell: QuantumCircuit, compiler: _
     assert first_info["changed"]
     assert first_info["potential"] == pytest.approx(0.0)
     assert not first_info["mapped"]
-    assert first_observation[7] == pytest.approx(0.01)
-    assert first_observation[8] == pytest.approx(0.01)
-    assert second_observation[7] == pytest.approx(0.02)
-    assert second_observation[9] == pytest.approx(0.01)
+    assert first_observation[FEATURE_NAMES.index("step_fraction")] == pytest.approx(0.05)
+    assert first_observation[FEATURE_NAMES.index(f"{ACTION_NAMES[0]}_count")] == pytest.approx(0.05)
+    assert second_observation[FEATURE_NAMES.index("step_fraction")] == pytest.approx(0.1)
+    assert second_observation[FEATURE_NAMES.index(f"{ACTION_NAMES[1]}_count")] == pytest.approx(0.05)
+
+
+def test_gate_frequencies_keep_unknown_operations_in_denominator(compiler: _FakeCompiler) -> None:
+    """The v3 gate-frequency denominator includes operations outside its vocabulary."""
+    circuit = QuantumCircuit(1, 1)
+    circuit.r(0.5, 0.25, 0)
+    circuit.barrier()
+    circuit.x(0)
+    circuit.measure(0, 0)
+    env = _environment([circuit])
+
+    observation, _ = env.reset(options={"circuit_index": 0})
+
+    assert compiler.imports == 1
+    assert observation[FEATURE_NAMES.index("x")] == pytest.approx(1 / 3)
+    assert observation[FEATURE_NAMES.index("measure")] == pytest.approx(1 / 3)
 
 
 @pytest.mark.parametrize("action", range(3))
@@ -537,10 +602,10 @@ def test_reset_rejects_circuit_larger_than_target(bell: QuantumCircuit, compiler
     assert compiler.imports == 0
 
 
-def test_environment_rejects_more_than_one_hundred_passes(bell: QuantumCircuit) -> None:
-    """History normalization has a fixed 100-pass ABI."""
-    with pytest.raises(ValueError, match="between 1 and 100"):
-        _environment([bell], max_passes=101)
+def test_environment_rejects_more_than_twenty_passes(bell: QuantumCircuit) -> None:
+    """History normalization has a fixed 20-pass ABI."""
+    with pytest.raises(ValueError, match="between 1 and 20"):
+        _environment([bell], max_passes=21)
 
 
 def test_current_core_compiles_bell_for_iqm_garnet(
@@ -555,17 +620,23 @@ def test_current_core_compiles_bell_for_iqm_garnet(
 
     observation, _ = env.reset(options={"circuit_index": 0})
     assert env.observation_space.contains(observation)
-    np.testing.assert_allclose(
-        observation,
-        [0.15, 0.1408497, 1.0, 1.0, 0.6, 0.0, 0.6111111, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        rtol=1e-6,
-        atol=1e-6,
-    )
+    expected = np.zeros(len(FEATURE_NAMES), dtype=np.float32)
+    expected[FEATURE_NAMES.index("critical_depth")] = 1.0
+    expected[FEATURE_NAMES.index("cx")] = 3 / 8
+    expected[FEATURE_NAMES.index("depth")] = math.log1p(6) / math.log1p(999_999)
+    expected[FEATURE_NAMES.index("entanglement_ratio")] = 0.6
+    expected[FEATURE_NAMES.index("h")] = 1 / 8
+    expected[FEATURE_NAMES.index("liveness")] = 0.6111111
+    expected[FEATURE_NAMES.index("measure")] = 3 / 8
+    expected[FEATURE_NAMES.index("num_qubits")] = 0.15
+    expected[FEATURE_NAMES.index("program_communication")] = 1.0
+    expected[FEATURE_NAMES.index("rz")] = 1 / 8
+    np.testing.assert_allclose(observation, expected, rtol=1e-6, atol=1e-6)
 
     mapped_observation, _, _, _, _ = env.step(3)
     mapped_qiskit = env.program.copy().to_qc().to_qiskit(target=target)
     assert mapped_qiskit.num_qubits == target.num_qubits
-    assert mapped_observation[0] == pytest.approx(0.15)
+    assert mapped_observation[FEATURE_NAMES.index("num_qubits")] == pytest.approx(0.15)
 
     env.step(4)
     observation, _, terminated, truncated, info = env.step(5)
@@ -707,4 +778,4 @@ def test_current_core_qft_uses_compiled_critical_path_semantics(
 
     observation, _ = env.reset(options={"circuit_index": 0})
 
-    assert observation[3] == pytest.approx(0.75)
+    assert observation[FEATURE_NAMES.index("critical_depth")] == pytest.approx(0.5)

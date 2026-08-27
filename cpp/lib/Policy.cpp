@@ -18,21 +18,17 @@
 namespace mqt::predictor::compiler {
 namespace {
 
-constexpr auto WEIGHTS =
-    std::array<std::array<float, NUM_FEATURES>, NUM_ACTIONS>{
-        std::array{0.00F, 1.60F, 0.00F, 0.00F, -0.20F, 0.00F, 0.10F, 0.00F,
-                   0.00F, 0.00F, 0.00F, 0.00F, 0.00F},
-        std::array{0.00F, 1.30F, 0.00F, 0.00F, -0.15F, 0.00F, 0.00F, 0.00F,
-                   0.00F, 0.00F, 0.00F, 0.00F, 0.00F},
-        std::array{0.00F, 0.00F, 0.00F, 0.05F, 0.12F, 0.00F, 0.00F, 0.00F,
-                   0.00F, 0.00F, 0.00F, 0.00F, 0.00F},
-        std::array{0.00F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F,
-                   0.00F, 0.00F, 0.00F, 0.00F, 0.00F},
-        std::array{0.00F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F,
-                   0.00F, 0.00F, 0.00F, 0.00F, 0.00F},
-        std::array{0.00F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F,
-                   0.00F, 0.00F, 0.00F, 0.00F, 0.00F},
-    };
+constexpr auto WEIGHTS = [] {
+  std::array<std::array<float, NUM_FEATURES>, NUM_ACTIONS> weights{};
+  weights[0][18] = 1.60F;  // depth
+  weights[0][19] = -0.20F; // entanglement_ratio
+  weights[0][22] = 0.10F;  // liveness
+  weights[1][18] = 1.30F;
+  weights[1][19] = -0.15F;
+  weights[2][6] = 0.05F; // critical_depth
+  weights[2][19] = 0.12F;
+  return weights;
+}();
 
 constexpr auto BIASES =
     std::array<float, NUM_ACTIONS>{0.05F, 0.04F, 0.02F, 0.11F, 0.10F, 1.00F};

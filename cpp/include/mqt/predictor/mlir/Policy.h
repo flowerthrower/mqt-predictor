@@ -19,24 +19,71 @@
 namespace mqt::predictor::compiler {
 
 inline constexpr std::string_view EXPERIMENT_SCHEMA =
-    "mqt-predictor-core-stages/1";
-inline constexpr std::size_t NUM_FEATURES = 13;
+    "mqt-predictor-core-stages/2";
+inline constexpr std::size_t NUM_V3_FEATURES = 50;
+inline constexpr std::size_t NUM_FEATURES = 56;
 inline constexpr std::array<std::string_view, NUM_FEATURES> FEATURE_NAMES{
-    "relative_qubits",
-    "log_depth",
-    "program_communication",
+    "c3sqrtx",
+    "c3x",
+    "c4x",
+    "ccx",
+    "ch",
+    "cp",
     "critical_depth",
+    "crx",
+    "cry",
+    "crz",
+    "cswap",
+    "csx",
+    "cu",
+    "cu1",
+    "cu3",
+    "cx",
+    "cy",
+    "cz",
+    "depth",
     "entanglement_ratio",
-    "parallelism",
+    "h",
+    "id",
     "liveness",
+    "measure",
+    "num_qubits",
+    "p",
+    "parallelism",
+    "program_communication",
+    "rc3x",
+    "rccx",
+    "rx",
+    "rxx",
+    "ry",
+    "rz",
+    "rzz",
+    "s",
+    "sdg",
+    "swap",
+    "sx",
+    "sxdg",
+    "t",
+    "tdg",
+    "u",
+    "u0",
+    "u1",
+    "u2",
+    "u3",
+    "x",
+    "y",
+    "z",
     "step_fraction",
     "merge-single-qubit-rotation-gates_count",
     "fuse-single-qubit-unitary-runs_count",
     "fuse-two-qubit-gates_count",
     "place-and-route_count",
     "synthesize-for-target_count"};
-inline constexpr double DEPTH_NORMALIZATION_MAX = 1'000'000.0;
-inline constexpr std::size_t MAX_TRANSFORM_PASSES = 100;
+inline constexpr std::size_t STEP_FRACTION_INDEX = NUM_V3_FEATURES;
+inline constexpr std::size_t ACTION_COUNT_FEATURE_OFFSET =
+    STEP_FRACTION_INDEX + 1;
+inline constexpr double DEPTH_NORMALIZATION_MAX = 999'999.0;
+inline constexpr std::size_t MAX_TRANSFORM_PASSES = 20;
 
 using FeatureVector = std::array<float, NUM_FEATURES>;
 

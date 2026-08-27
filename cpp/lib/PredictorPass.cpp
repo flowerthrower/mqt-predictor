@@ -481,9 +481,10 @@ private:
 
       const auto moduleBefore = moduleFingerprint(module);
       constexpr auto denominator = static_cast<float>(MAX_TRANSFORM_PASSES);
-      analysis->features.values[7] = static_cast<float>(step) / denominator;
+      analysis->features.values[STEP_FRACTION_INDEX] =
+          static_cast<float>(step) / denominator;
       for (std::size_t action = 0; action < actionCounts.size(); ++action) {
-        analysis->features.values[8 + action] =
+        analysis->features.values[ACTION_COUNT_FEATURE_OFFSET + action] =
             static_cast<float>(actionCounts[action]) / denominator;
       }
       ActionMask suppressed{};

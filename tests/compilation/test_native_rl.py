@@ -27,12 +27,34 @@ from mqt.predictor.compiled.policy import ACTION_NAMES, FEATURE_NAMES, LinearPol
 
 def test_parse_sampled_native_episode() -> None:
     """The trainer consumes the C++ feature, mask, action, and metric order."""
-    trace = """
-[mqt-predictor] step=0 action=fuse-two-qubit-gates qubits=4 depth=8 two_qubit_depth=2 gates=12 two_qubit=3 mapped=0 routed=0 synthesized=0 legal=111110 features={relative_qubits=1,log_depth=0.2,program_communication=0.5,critical_depth=0.4,entanglement_ratio=0.25,parallelism=0.5,liveness=0.75,step_fraction=0,merge-single-qubit-rotation-gates_count=0,fuse-single-qubit-unitary-runs_count=0,fuse-two-qubit-gates_count=0,place-and-route_count=0,synthesize-for-target_count=0}
-[mqt-predictor] step=1 action=fuse-two-qubit-gates qubits=4 depth=7 two_qubit_depth=2 gates=11 two_qubit=3 mapped=0 routed=0 synthesized=0 legal=111110 features={relative_qubits=1,log_depth=0.19,program_communication=0.5,critical_depth=0.4,entanglement_ratio=0.27,parallelism=0.5,liveness=0.75,step_fraction=0.01,merge-single-qubit-rotation-gates_count=0,fuse-single-qubit-unitary-runs_count=0,fuse-two-qubit-gates_count=0.01,place-and-route_count=0,synthesize-for-target_count=0}
-[mqt-predictor] step=2 action=place-and-route qubits=4 depth=7 two_qubit_depth=2 gates=11 two_qubit=3 mapped=0 routed=0 synthesized=0 legal=111110 features={relative_qubits=1,log_depth=0.19,program_communication=0.5,critical_depth=0.4,entanglement_ratio=0.27,parallelism=0.5,liveness=0.75,step_fraction=0.02,merge-single-qubit-rotation-gates_count=0,fuse-single-qubit-unitary-runs_count=0,fuse-two-qubit-gates_count=0.02,place-and-route_count=0,synthesize-for-target_count=0}
-[mqt-predictor] step=3 action=synthesize-for-target qubits=4 depth=9 two_qubit_depth=4 gates=15 two_qubit=6 mapped=1 routed=1 synthesized=0 legal=111010 features={relative_qubits=1,log_depth=0.21,program_communication=0.5,critical_depth=0.67,entanglement_ratio=0.4,parallelism=0.4,liveness=0.6,step_fraction=0.03,merge-single-qubit-rotation-gates_count=0,fuse-single-qubit-unitary-runs_count=0,fuse-two-qubit-gates_count=0.02,place-and-route_count=0.01,synthesize-for-target_count=0}
-[mqt-predictor] step=4 action=terminate qubits=4 depth=10 two_qubit_depth=4 gates=16 two_qubit=6 mapped=1 routed=1 synthesized=1 legal=111001 features={relative_qubits=1,log_depth=0.22,program_communication=0.5,critical_depth=0.67,entanglement_ratio=0.38,parallelism=0.4,liveness=0.6,step_fraction=0.04,merge-single-qubit-rotation-gates_count=0,fuse-single-qubit-unitary-runs_count=0,fuse-two-qubit-gates_count=0.02,place-and-route_count=0.01,synthesize-for-target_count=0.01}
+
+    def feature_text(values: dict[str, float]) -> str:
+        return ",".join(f"{name}={values.get(name, 0)}" for name in FEATURE_NAMES)
+
+    feature_rows = [
+        feature_text({"depth": 0.2, "step_fraction": 0.0}),
+        feature_text({"depth": 0.19, "step_fraction": 0.05, "fuse-two-qubit-gates_count": 0.05}),
+        feature_text({"depth": 0.19, "step_fraction": 0.1, "fuse-two-qubit-gates_count": 0.1}),
+        feature_text({
+            "depth": 0.21,
+            "step_fraction": 0.15,
+            "fuse-two-qubit-gates_count": 0.1,
+            "place-and-route_count": 0.05,
+        }),
+        feature_text({
+            "depth": 0.22,
+            "step_fraction": 0.2,
+            "fuse-two-qubit-gates_count": 0.1,
+            "place-and-route_count": 0.05,
+            "synthesize-for-target_count": 0.05,
+        }),
+    ]
+    trace = f"""
+[mqt-predictor] step=0 action=fuse-two-qubit-gates qubits=4 depth=8 two_qubit_depth=2 gates=12 two_qubit=3 mapped=0 routed=0 synthesized=0 legal=111110 features={{{feature_rows[0]}}}
+[mqt-predictor] step=1 action=fuse-two-qubit-gates qubits=4 depth=7 two_qubit_depth=2 gates=11 two_qubit=3 mapped=0 routed=0 synthesized=0 legal=111110 features={{{feature_rows[1]}}}
+[mqt-predictor] step=2 action=place-and-route qubits=4 depth=7 two_qubit_depth=2 gates=11 two_qubit=3 mapped=0 routed=0 synthesized=0 legal=111110 features={{{feature_rows[2]}}}
+[mqt-predictor] step=3 action=synthesize-for-target qubits=4 depth=9 two_qubit_depth=4 gates=15 two_qubit=6 mapped=1 routed=1 synthesized=0 legal=111010 features={{{feature_rows[3]}}}
+[mqt-predictor] step=4 action=terminate qubits=4 depth=10 two_qubit_depth=4 gates=16 two_qubit=6 mapped=1 routed=1 synthesized=1 legal=111001 features={{{feature_rows[4]}}}
 """
 
     episode = parse_episode(trace)

@@ -21,7 +21,7 @@ from gymnasium import Env
 from gymnasium.spaces import Box, Discrete
 
 from .native_rl import PASS_PENALTY, CompileMetrics
-from .policy import ACTION_NAMES, FEATURE_NAMES, MAX_PASSES
+from .policy import ACTION_NAMES, FEATURE_NAMES, MAX_PASSES, V3_FEATURE_NAMES, V3_OPERATION_NAMES
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -34,7 +34,7 @@ NUM_TRANSFORM_ACTIONS = len(ACTION_NAMES) - 1
 TERMINATE_ACTION = len(ACTION_NAMES) - 1
 PLACE_AND_ROUTE_ACTION = 3
 SYNTHESIZE_ACTION = 4
-DEPTH_NORMALIZATION_MAX = 1_000_000.0
+DEPTH_NORMALIZATION_MAX = 999_999
 
 
 class _QCProgram(Protocol):
@@ -156,7 +156,10 @@ def _structural_features(
             msg = "compiled policy features require straight-line circuits"
             raise ValueError(msg)
 
-        prior = max((states[qubit] for qubit in qubits), default=(0, 0))
+        prior = states[qubits[0]]
+        for qubit in qubits[1:]:
+            if states[qubit][0] > prior[0]:
+                prior = states[qubit]
         if operation.name in {"measure", "reset"}:
             next_state = (prior[0] + 1, prior[1])
             activity += len(qubits)
@@ -170,7 +173,8 @@ def _structural_features(
                 interactions.add(tuple(sorted(qubits)))
         for qubit in qubits:
             states[qubit] = next_state
-        maximum = max(maximum, next_state)
+        if next_state[0] >= maximum[0]:
+            maximum = next_state
 
     depth, two_qubit_critical_depth = maximum
     communication = 2 * len(interactions) / (num_qubits * (num_qubits - 1)) if num_qubits > 1 else 0.0
@@ -189,7 +193,7 @@ class CorePredictorEnv(Env):
         circuits: Sequence[QuantumCircuit],
         target: _CompilerTarget,
         *,
-        max_passes: int = 100,
+        max_passes: int = MAX_PASSES,
     ) -> None:
         """Initialize the Core-only pass-ordering environment.
 
@@ -304,14 +308,28 @@ class CorePredictorEnv(Env):
             circuit,
             num_qubits=num_qubits,
         )
+        operation_counts = dict.fromkeys(V3_OPERATION_NAMES, 0)
+        total_operations = 0
+        for instruction in circuit.data:
+            operation_name = instruction.operation.name
+            if operation_name == "barrier":
+                continue
+            total_operations += 1
+            if operation_name in operation_counts:
+                operation_counts[operation_name] += 1
+        denominator = max(total_operations, 1)
+        v3_features = {
+            **{name: count / denominator for name, count in operation_counts.items()},
+            "critical_depth": critical_depth,
+            "depth": math.log1p(min(depth, DEPTH_NORMALIZATION_MAX)) / math.log1p(DEPTH_NORMALIZATION_MAX),
+            "entanglement_ratio": entanglement_ratio,
+            "liveness": liveness,
+            "num_qubits": num_qubits / self.target.num_qubits,
+            "parallelism": parallelism,
+            "program_communication": communication,
+        }
         values = [
-            num_qubits / self.target.num_qubits,
-            math.log1p(depth) / math.log1p(DEPTH_NORMALIZATION_MAX),
-            communication,
-            critical_depth,
-            entanglement_ratio,
-            parallelism,
-            liveness,
+            *(v3_features[name] for name in V3_FEATURE_NAMES),
             num_passes / MAX_PASSES,
             *(count / MAX_PASSES for count in action_counts),
         ]

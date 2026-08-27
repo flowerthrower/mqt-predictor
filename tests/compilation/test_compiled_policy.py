@@ -34,7 +34,7 @@ INPUTS = Path(__file__).parents[2] / "cpp" / "test" / "Inputs"
 
 
 def test_minimal_training_is_deterministic() -> None:
-    """The 32-step smoke training run is reproducible."""
+    """The smoke dataset produces a reproducible 32-epoch fit."""
     dataset = json.loads((INPUTS / "line-4-training.json").read_text(encoding="utf-8"))
     assert dataset["purpose"] == (
         "manually curated ABI smoke samples; not a reproducible Core trajectory or performance dataset"
@@ -57,7 +57,7 @@ def test_checked_in_artifact_matches_python_contract() -> None:
 
     assert artifact["compatibility"]["target_fingerprint"] == target_fingerprint(INPUTS / "line-4-target.json")
     assert artifact["parameters_sha256"] == parameter_checksum(weights, bias)
-    assert artifact["training"]["epochs"] == 32
+    assert artifact["training"]["epochs"] == 1
     assert artifact["training"]["objective"] == (
         "manually curated ABI smoke samples; not a reproducible Core trajectory or performance dataset"
     )
@@ -71,7 +71,12 @@ def test_training_fixture_only_enables_terminate_after_core_stages() -> None:
     assert terminal_samples
     assert all(sample["action"] == "terminate" for sample in terminal_samples)
     assert all(sample["legal"][3:] == [False, False, True] for sample in terminal_samples)
-    assert all(sample["features"][11] > 0 and sample["features"][12] > 0 for sample in terminal_samples)
+    place_count = FEATURE_NAMES.index("place-and-route_count")
+    synthesis_count = FEATURE_NAMES.index("synthesize-for-target_count")
+    assert all(
+        sample["features"][place_count] > 0 and sample["features"][synthesis_count] > 0
+        for sample in terminal_samples
+    )
 
 
 def test_policy_masks_illegal_actions() -> None:

@@ -152,7 +152,7 @@ if(BUILD_TESTING)
     add_test(
       NAME mqt-predictor-iqm-garnet-onnx-model-e2e
       COMMAND
-        mqt-predictor-cc --trace --max-steps=16
+        mqt-predictor-cc --trace --max-steps=20
         --qdmi-device=mqt.sc.iqm.garnet
         --model=${CMAKE_CURRENT_SOURCE_DIR}/models/iqm-garnet-ppo-tanh16.onnx
         -o ${CMAKE_CURRENT_BINARY_DIR}/qft-4-iqm-garnet-onnx-model.mlir
@@ -168,7 +168,7 @@ if(BUILD_TESTING)
   add_test(
     NAME mqt-predictor-register-model-e2e
     COMMAND
-      mqt-predictor-cc --trace --max-steps=100
+      mqt-predictor-cc --trace --max-steps=20
       --target=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-target.json
       --model=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-policy.json -o
       ${CMAKE_CURRENT_BINARY_DIR}/register-model.mlir
@@ -215,7 +215,7 @@ if(BUILD_TESTING)
     mqt-predictor-bootstrap-e2e
     PROPERTIES
       PASS_REGULAR_EXPRESSION
-      "step=5.*features=\\{relative_qubits=7[.]500000e-01,log_depth=1[.]505150e-01,program_communication=6[.]666667e-01,critical_depth=1[.]000000e[+]00,entanglement_ratio=8[.]000000e-01,parallelism=0[.]000000e[+]00,liveness=5[.]714286e-01,step_fraction=5[.]000000e-02,merge-single-qubit-rotation-gates_count=3[.]000000e-02,fuse-single-qubit-unitary-runs_count=0[.]000000e[+]00,fuse-two-qubit-gates_count=1[.]000000e-02,place-and-route_count=1[.]000000e-02,synthesize-for-target_count=0[.]000000e[+]00\\}"
+      "step=5.*features=\\{.*critical_depth=1[.]000000e[+]00.*cx=3[.]750000e-01.*depth=1[.]505150e-01.*entanglement_ratio=8[.]000000e-01.*liveness=5[.]714286e-01.*measure=3[.]750000e-01.*num_qubits=7[.]500000e-01.*program_communication=6[.]666667e-01.*swap=1[.]250000e-01.*u2=1[.]250000e-01.*step_fraction=2[.]500000e-01,merge-single-qubit-rotation-gates_count=1[.]500000e-01,fuse-single-qubit-unitary-runs_count=0[.]000000e[+]00,fuse-two-qubit-gates_count=5[.]000000e-02,place-and-route_count=5[.]000000e-02,synthesize-for-target_count=0[.]000000e[+]00\\}"
       FAIL_REGULAR_EXPRESSION "falling back;error:")
 
   add_test(
@@ -238,7 +238,7 @@ if(BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/wide.qasm)
   set_tests_properties(
     mqt-predictor-wide-e2e
-    PROPERTIES PASS_REGULAR_EXPRESSION "schema=mqt-predictor-core-stages/1"
+    PROPERTIES PASS_REGULAR_EXPRESSION "schema=mqt-predictor-core-stages/2"
                FAIL_REGULAR_EXPRESSION "unsupported QCO structure;error:")
 
   add_test(
@@ -249,8 +249,23 @@ if(BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/qft-4.qasm)
   set_tests_properties(
     mqt-predictor-qft-feature-e2e
-    PROPERTIES PASS_REGULAR_EXPRESSION "critical_depth=7[.]500000e-01"
+    PROPERTIES
+      PASS_REGULAR_EXPRESSION
+      "features=\\{.*cp=3[.]750000e-01,critical_depth=5[.]000000e-01.*h=2[.]500000e-01.*measure=2[.]500000e-01.*swap=1[.]250000e-01"
                FAIL_REGULAR_EXPRESSION "unsupported QCO structure;error:")
+
+  add_test(
+    NAME mqt-predictor-controlled-u-feature-e2e
+    COMMAND
+      mqt-predictor-cc --trace --max-steps=1 --target-qubits=2 -o
+      ${CMAKE_CURRENT_BINARY_DIR}/controlled-u-feature.mlir
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/controlled-u.qasm)
+  set_tests_properties(
+    mqt-predictor-controlled-u-feature-e2e
+    PROPERTIES
+      PASS_REGULAR_EXPRESSION
+      "features=\\{.*cu3=2[.]500000e-01.*measure=5[.]000000e-01.*p=2[.]500000e-01"
+      FAIL_REGULAR_EXPRESSION "unsupported QCO structure;error:")
 
   add_test(
     NAME mqt-predictor-core-e2e

@@ -25,6 +25,7 @@
 #include <mlir/IR/Operation.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -36,6 +37,15 @@ namespace mqt::predictor::compiler {
 namespace {
 
 using SiteId = ::mlir::CompilerTarget::SiteId;
+using OperationCounts = std::array<std::size_t, NUM_V3_FEATURES>;
+
+constexpr std::size_t CRITICAL_DEPTH_INDEX = 6;
+constexpr std::size_t DEPTH_INDEX = 18;
+constexpr std::size_t ENTANGLEMENT_RATIO_INDEX = 19;
+constexpr std::size_t LIVENESS_INDEX = 22;
+constexpr std::size_t NUM_QUBITS_INDEX = 24;
+constexpr std::size_t PARALLELISM_INDEX = 26;
+constexpr std::size_t PROGRAM_COMMUNICATION_INDEX = 27;
 
 struct WireState {
   std::size_t logical = 0;
@@ -54,6 +64,89 @@ struct WireState {
   };
   return llvm::any_of(operation.getOperands(), isQubit) ||
          llvm::any_of(operation.getResults(), isQubit);
+}
+
+void recordNamedOperation(OperationCounts& counts,
+                          const llvm::StringRef operationName) {
+  for (std::size_t index = 0; index < NUM_V3_FEATURES; ++index) {
+    const auto featureName = FEATURE_NAMES[index];
+    if (operationName ==
+        llvm::StringRef(featureName.data(), featureName.size())) {
+      ++counts[index];
+      return;
+    }
+  }
+}
+
+[[nodiscard]] std::optional<llvm::StringRef>
+canonicalOperationName(::mlir::qco::UnitaryOpInterface unitary) {
+  using namespace ::mlir;
+  using namespace ::mlir::qco;
+
+  auto controlled = dyn_cast<CtrlOp>(unitary.getOperation());
+  if (!controlled) {
+    return unitary.getBaseSymbol();
+  }
+  if (controlled.getNumBodyUnitaries() != 1) {
+    return std::nullopt;
+  }
+
+  auto body = controlled.getBodyUnitary(0);
+  const auto base = body.getBaseSymbol();
+  const auto controls = controlled.getNumControls();
+  const auto targets = controlled.getNumTargets();
+  if (controls == 1) {
+    if (targets == 2 && base == "swap") {
+      return "cswap";
+    }
+    if (targets != 1) {
+      return std::nullopt;
+    }
+    if (base == "x") {
+      return "cx";
+    }
+    if (base == "y") {
+      return "cy";
+    }
+    if (base == "z") {
+      return "cz";
+    }
+    if (base == "h") {
+      return "ch";
+    }
+    if (base == "p") {
+      return "cp";
+    }
+    if (base == "rx") {
+      return "crx";
+    }
+    if (base == "ry") {
+      return "cry";
+    }
+    if (base == "rz") {
+      return "crz";
+    }
+    if (base == "sx") {
+      return "csx";
+    }
+    if (base == "u") {
+      return "cu3";
+    }
+    return std::nullopt;
+  }
+  if (targets != 1 || base != "x") {
+    return std::nullopt;
+  }
+  if (controls == 2) {
+    return "ccx";
+  }
+  if (controls == 3) {
+    return "c3x";
+  }
+  if (controls == 4) {
+    return "c4x";
+  }
+  return std::nullopt;
 }
 
 } // namespace
@@ -80,6 +173,8 @@ analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target,
   std::size_t staticRoots = 0;
   std::size_t numGates = 0;
   std::size_t numTwoQubitGates = 0;
+  std::size_t totalOperations = 0;
+  OperationCounts operationCounts{};
   std::size_t maxDepth = 0;
   std::size_t twoQubitCriticalDepth = 0;
   std::size_t activity = 0;
@@ -88,9 +183,7 @@ analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target,
   bool hasWideUnitary = false;
 
   const auto recordDepth = [&](const WireState& wire) {
-    if (wire.depth > maxDepth ||
-        (wire.depth == maxDepth &&
-         wire.twoQubitCriticalDepth > twoQubitCriticalDepth)) {
+    if (wire.depth >= maxDepth) {
       maxDepth = wire.depth;
       twoQubitCriticalDepth = wire.twoQubitCriticalDepth;
     }
@@ -228,6 +321,11 @@ analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target,
         continue;
       }
 
+      ++totalOperations;
+      if (const auto operationName = canonicalOperationName(unitary)) {
+        recordNamedOperation(operationCounts, *operationName);
+      }
+
       const auto arity = unitary.getNumQubits();
       if (arity == 0 || operation.getNumRegions() > 1) {
         return failure();
@@ -240,12 +338,9 @@ analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target,
         if (found == wires.end()) {
           return failure();
         }
-        const auto candidate =
-            std::pair{found->second.depth, found->second.twoQubitCriticalDepth};
-        const auto current = std::pair{operationDepth, operationCriticalDepth};
-        if (candidate > current) {
-          operationDepth = candidate.first;
-          operationCriticalDepth = candidate.second;
+        if (found->second.depth > operationDepth) {
+          operationDepth = found->second.depth;
+          operationCriticalDepth = found->second.twoQubitCriticalDepth;
         }
       }
       ++operationDepth;
@@ -290,6 +385,8 @@ analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target,
       if (found == wires.end()) {
         return failure();
       }
+      ++totalOperations;
+      recordNamedOperation(operationCounts, "measure");
       synthesized &= target.supports(&operation);
       ++activity;
       if (!advanceWire(measure.getQubitIn(), measure.getQubitOut(), false,
@@ -305,6 +402,7 @@ analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target,
       if (found == wires.end()) {
         return failure();
       }
+      ++totalOperations;
       synthesized &= target.supports(&operation);
       ++activity;
       if (!advanceWire(reset.getQubitIn(), reset.getQubitOut(), false,
@@ -365,20 +463,33 @@ analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target,
                                   ? static_cast<double>(featureQubits) /
                                         static_cast<double>(target.numQubits())
                                   : 1.0;
-  const auto normalizedDepth = std::log1p(static_cast<double>(maxDepth)) /
-                               std::log1p(DEPTH_NORMALIZATION_MAX);
+  const auto normalizedDepth =
+      std::log1p(
+          std::min(static_cast<double>(maxDepth), DEPTH_NORMALIZATION_MAX)) /
+      std::log1p(DEPTH_NORMALIZATION_MAX);
+
+  FeatureVector values{};
+  if (totalOperations > 0) {
+    for (std::size_t index = 0; index < NUM_V3_FEATURES; ++index) {
+      values[index] = clampUnit(static_cast<double>(operationCounts[index]) /
+                                static_cast<double>(totalOperations));
+    }
+  }
+  values[CRITICAL_DEPTH_INDEX] = clampUnit(criticalDepth);
+  values[DEPTH_INDEX] = clampUnit(normalizedDepth);
+  values[ENTANGLEMENT_RATIO_INDEX] = clampUnit(entanglement);
+  values[LIVENESS_INDEX] = clampUnit(liveness);
+  values[NUM_QUBITS_INDEX] = clampUnit(relativeQubits);
+  values[PARALLELISM_INDEX] = clampUnit(parallelism);
+  values[PROGRAM_COMMUNICATION_INDEX] = clampUnit(communication);
 
   CircuitAnalysis analysis;
-  analysis.features = CircuitFeatures{
-      .numQubits = featureQubits,
-      .depth = maxDepth,
-      .twoQubitDepth = twoQubitCriticalDepth,
-      .numGates = numGates,
-      .numTwoQubitGates = numTwoQubitGates,
-      .values = {clampUnit(relativeQubits), clampUnit(normalizedDepth),
-                 clampUnit(communication), clampUnit(criticalDepth),
-                 clampUnit(entanglement), clampUnit(parallelism),
-                 clampUnit(liveness)}};
+  analysis.features = CircuitFeatures{.numQubits = featureQubits,
+                                      .depth = maxDepth,
+                                      .twoQubitDepth = twoQubitCriticalDepth,
+                                      .numGates = numGates,
+                                      .numTwoQubitGates = numTwoQubitGates,
+                                      .values = values};
   analysis.state = CompilerState{.mapped = mapped,
                                  .routed = routed,
                                  .synthesized = synthesized,

@@ -1655,8 +1655,8 @@ wheels = [
 
 [[package]]
 name = "mqt-core"
-version = "3.3.4.dev1536+g3036c9123"
-source = { git = "https://github.com/munich-quantum-toolkit/core.git?rev=3036c91238449452d53cb6aca5d02ce503d8f1ac#3036c91238449452d53cb6aca5d02ce503d8f1ac" }
+version = "3.3.4.dev1538+g99fd4d2ef"
+source = { git = "https://github.com/munich-quantum-toolkit/core.git?rev=99fd4d2ef93a8680ed17a9e7bed72bce77aaadce#99fd4d2ef93a8680ed17a9e7bed72bce77aaadce" }
 dependencies = [
     { name = "nanobind-backend", marker = "python_full_version >= '3.11'" },
 ]
@@ -1739,7 +1739,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 compiled = [
-    { name = "mqt-core", extras = ["qiskit"], marker = "python_full_version >= '3.11'", git = "https://github.com/munich-quantum-toolkit/core.git?rev=3036c91238449452d53cb6aca5d02ce503d8f1ac" },
+    { name = "mqt-core", extras = ["qiskit"], marker = "python_full_version >= '3.11'", git = "https://github.com/munich-quantum-toolkit/core.git?rev=99fd4d2ef93a8680ed17a9e7bed72bce77aaadce" },
     { name = "onnx", marker = "python_full_version >= '3.11'", specifier = ">=1.20.0" },
     { name = "onnxruntime", marker = "python_full_version >= '3.11'", specifier = ">=1.29.0,<1.30" },
 ]

@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from .policy import ACTION_NAMES, FEATURE_NAMES, LinearPolicy, export_linear_policy
+from .policy import ACTION_NAMES, FEATURE_NAMES, MAX_PASSES, LinearPolicy, export_linear_policy
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -575,7 +575,7 @@ def _parser() -> argparse.ArgumentParser:
     target.add_argument("--target", type=Path)
     target.add_argument("--qdmi-device")
     target.add_argument("--target-qubits", type=int, default=5)
-    parser.add_argument("--max-passes", type=int, default=100)
+    parser.add_argument("--max-passes", type=int, default=MAX_PASSES)
     parser.add_argument("--updates", type=int, default=4)
     parser.add_argument("--episodes-per-circuit", type=int, default=2)
     parser.add_argument("--learning-rate", type=float, default=0.1)

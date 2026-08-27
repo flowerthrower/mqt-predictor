@@ -10,6 +10,8 @@
 
 #include "mqt/predictor/mlir/Policy.h"
 
+#include "mqt/predictor/mlir/PredictorPass.h"
+
 #include <cstdlib>
 #include <iostream>
 #include <optional>
@@ -34,9 +36,18 @@ using namespace mqt::predictor::compiler;
 int main() {
   using namespace mqt::predictor::compiler;
 
+  if (EXPERIMENT_SCHEMA != "mqt-predictor-core-stages/2" ||
+      FEATURE_NAMES.size() != 56 || FEATURE_NAMES[0] != "c3sqrtx" ||
+      FEATURE_NAMES[49] != "z" || FEATURE_NAMES[50] != "step_fraction" ||
+      MAX_TRANSFORM_PASSES != 20 || PredictorOptions{}.maxSteps != 20) {
+    std::cerr << "v3 observation contract is inconsistent\n";
+    return EXIT_FAILURE;
+  }
+
   const BootstrapLinearPolicy policy;
-  const FeatureVector features{0.6F, 0.2F, 0.0F, 0.0F, 0.0F, 0.7F, 0.6F,
-                               0.1F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
+  FeatureVector features{};
+  features[18] = 0.2F; // depth
+  features[22] = 0.6F; // liveness
   ActionMask suppressed{};
 
   auto mask = legalActions({}, suppressed);

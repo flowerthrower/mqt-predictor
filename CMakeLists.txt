@@ -35,7 +35,7 @@ set(CMAKE_CXX_EXTENSIONS ON)
 include(FetchContent)
 
 set(MQT_CORE_REVISION
-    "3036c91238449452d53cb6aca5d02ce503d8f1ac"
+    "99fd4d2ef93a8680ed17a9e7bed72bce77aaadce"
     CACHE INTERNAL "MQT Core revision used by the experimental MLIR predictor" FORCE)
 set(MQT_CORE_SOURCE_DIR
     "$ENV{MQT_CORE_SOURCE_DIR}"

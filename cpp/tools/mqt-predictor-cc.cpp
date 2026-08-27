@@ -28,9 +28,9 @@
 
 namespace {
 
+using mqt::predictor::compiler::MAX_TRANSFORM_PASSES;
 using mqt::predictor::compiler::PolicyMode;
 using mqt::predictor::compiler::PredictorOptions;
-using mqt::predictor::compiler::MAX_TRANSFORM_PASSES;
 
 struct DriverOptions {
   std::filesystem::path input;
@@ -53,7 +53,7 @@ void printHelp(llvm::raw_ostream& output) {
          "  --target=<path>       Load a JSON compiler target\n"
          "  --qdmi-device=<id>    Snapshot a registered QDMI compiler target\n"
          "  --target-qubits=<n>   Built-in line target size (default: 5)\n"
-         "  --max-steps=<n>       Maximum transformation passes (default: 100)\n"
+         "  --max-steps=<n>       Maximum transformation passes (default: 20)\n"
          "  --sample-policy       Sample model actions for RL training\n"
          "  --sampling-seed=<n>   Seed for sampled model actions (default: 0)\n"
          "  --trace               Print features, states, and actions\n"
