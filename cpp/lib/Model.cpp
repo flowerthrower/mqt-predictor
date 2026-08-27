@@ -694,6 +694,9 @@ public:
     };
     const std::array requirements{
         MetadataRequirement{"schema", ONNX_POLICY_SCHEMA, "unsupported schema"},
+        MetadataRequirement{
+            "architecture", "tanh-mlp-64x64",
+            "architecture metadata does not match the supported actor"},
         MetadataRequirement{"observation_schema", EXPERIMENT_SCHEMA,
                             "observation schema does not match this binary"},
         MetadataRequirement{"feature_names", joinedFeatureNames,
@@ -735,7 +738,7 @@ public:
       return onnxModelError(path,
                             "parameters_sha256 metadata is not a SHA-256 ID");
     }
-    for (const auto* requiredKey : {"architecture", "source_revision"}) {
+    for (const auto* requiredKey : {"source_revision"}) {
       auto value =
           requiredMetadata(*api, path, *metadata, *allocator, requiredKey);
       if (!value) {

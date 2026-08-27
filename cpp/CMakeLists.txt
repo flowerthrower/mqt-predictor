@@ -126,8 +126,8 @@ if(BUILD_TESTING)
       mqt-predictor-cc --trace --deterministic-policy
       --target=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-target.json
       --model=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-policy.json -o
-      ${CMAKE_CURRENT_BINARY_DIR}/bell-model.mlir
-      ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/bell.qasm)
+      ${CMAKE_CURRENT_BINARY_DIR}/native-line-deterministic-model.mlir
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/native-line.mlir)
   set_tests_properties(
     mqt-predictor-model-e2e
     PROPERTIES PASS_REGULAR_EXPRESSION "policy=model.*action=terminate"
@@ -139,8 +139,8 @@ if(BUILD_TESTING)
       mqt-predictor-cc --trace --max-steps=1
       --target=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-target.json
       --model=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-policy.json -o
-      ${CMAKE_CURRENT_BINARY_DIR}/bell-stochastic.mlir
-      ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/bell.qasm)
+      ${CMAKE_CURRENT_BINARY_DIR}/native-line-stochastic.mlir
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/native-line.mlir)
   set_tests_properties(
     mqt-predictor-stochastic-default-e2e
     PROPERTIES PASS_REGULAR_EXPRESSION
@@ -149,13 +149,21 @@ if(BUILD_TESTING)
 
   if(MQT_PREDICTOR_ENABLE_ONNX)
     add_test(
+      NAME mqt-predictor-onnx-rejects-architecture-mismatch
+      COMMAND
+        mqt-predictor-artifact-test
+        ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-target.json
+        ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-policy.onnx
+        ${CMAKE_CURRENT_BINARY_DIR}/line-4-policy-unsupported-architecture.onnx)
+
+    add_test(
       NAME mqt-predictor-onnx-model-e2e
       COMMAND
         mqt-predictor-cc --trace --deterministic-policy
         --target=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-target.json
         --model=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-policy.onnx -o
-        ${CMAKE_CURRENT_BINARY_DIR}/bell-onnx-model.mlir
-        ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/bell.qasm)
+        ${CMAKE_CURRENT_BINARY_DIR}/native-line-onnx-model.mlir
+        ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/native-line.mlir)
     set_tests_properties(
       mqt-predictor-onnx-model-e2e
       PROPERTIES
@@ -166,17 +174,18 @@ if(BUILD_TESTING)
     add_test(
       NAME mqt-predictor-iqm-garnet-onnx-model-e2e
       COMMAND
-        mqt-predictor-cc --trace --deterministic-policy --max-steps=20
+        mqt-predictor-cc --trace --sampling-seed=19 --max-steps=20
         --qdmi-device=mqt.sc.iqm.garnet
-        --model=${CMAKE_CURRENT_SOURCE_DIR}/models/iqm-garnet-ppo-tanh16.onnx
-        -o ${CMAKE_CURRENT_BINARY_DIR}/qft-4-iqm-garnet-onnx-model.mlir
-        ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/qft-4.qasm)
+        --model=${CMAKE_CURRENT_SOURCE_DIR}/models/iqm-garnet-ppo-tanh64x64.onnx
+        -o
+        ${CMAKE_CURRENT_BINARY_DIR}/controlled-u-iqm-garnet-onnx-model.mlir
+        ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/controlled-u-from-qiskit.mlir)
     set_tests_properties(
       mqt-predictor-iqm-garnet-onnx-model-e2e
       PROPERTIES
         PASS_REGULAR_EXPRESSION
-        "policy=model model_schema=mqt-predictor-onnx-policy/1.*action=terminate"
-        FAIL_REGULAR_EXPRESSION "falling back;error:")
+        "policy=model model_schema=mqt-predictor-onnx-policy/1.*sampling=stochastic sampling_seed=19.*action=terminate"
+        FAIL_REGULAR_EXPRESSION "falling back;truncated;error:")
   endif()
 
   add_test(
@@ -185,8 +194,8 @@ if(BUILD_TESTING)
       mqt-predictor-cc --trace --deterministic-policy --max-steps=20
       --target=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-target.json
       --model=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-policy.json -o
-      ${CMAKE_CURRENT_BINARY_DIR}/register-model.mlir
-      ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/register-routing.qasm)
+      ${CMAKE_CURRENT_BINARY_DIR}/controlled-u-register-model.mlir
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/controlled-u-from-qiskit.mlir)
   set_tests_properties(
     mqt-predictor-register-model-e2e
     PROPERTIES PASS_REGULAR_EXPRESSION "policy=model.*action=terminate"
@@ -218,6 +227,16 @@ if(BUILD_TESTING)
   set_tests_properties(
     mqt-predictor-model-rejects-partial-mapping-e2e
     PROPERTIES WILL_FAIL TRUE)
+
+  add_test(
+    NAME mqt-predictor-model-rejects-qasm-frontend
+    COMMAND
+      mqt-predictor-cc
+      --target=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-target.json
+      --model=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-policy.json
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/bell.qasm)
+  set_tests_properties(mqt-predictor-model-rejects-qasm-frontend
+                       PROPERTIES WILL_FAIL TRUE)
 
   add_test(
     NAME mqt-predictor-bootstrap-e2e
@@ -378,7 +397,7 @@ if(BUILD_TESTING)
 
   add_test(
     NAME mqt-predictor-rejects-pass-budget
-    COMMAND mqt-predictor-cc --max-steps=101
+    COMMAND mqt-predictor-cc --max-steps=21
             ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/bell.qasm)
   set_tests_properties(mqt-predictor-rejects-pass-budget PROPERTIES WILL_FAIL
                                                                        TRUE)

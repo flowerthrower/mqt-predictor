@@ -204,6 +204,12 @@ parseSize(const std::string_view value) {
     llvm::errs() << "--policy=model requires --model=<path>\n";
     return std::nullopt;
   }
+  if (options.predictor.policy == PolicyMode::Model &&
+      options.input.extension() != ".mlir") {
+    llvm::errs()
+        << "model policy requires QCO MLIR input for trained frontend parity\n";
+    return std::nullopt;
+  }
   if (options.predictor.deterministicPolicy &&
       options.predictor.policy != PolicyMode::Model) {
     llvm::errs() << "--deterministic-policy requires --model=<path>\n";

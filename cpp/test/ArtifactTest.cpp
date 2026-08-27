@@ -15,13 +15,18 @@
 
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <random>
+#include <string>
+#include <string_view>
 
 int main(const int argc, char** argv) {
   using namespace mqt::predictor::compiler;
-  if (argc != 3) {
-    std::cerr << "expected target and model paths\n";
+  if (argc != 3 && argc != 4) {
+    std::cerr << "expected target and model paths, with an optional invalid "
+                 "ONNX output path\n";
     return EXIT_FAILURE;
   }
 
@@ -34,6 +39,53 @@ int main(const int argc, char** argv) {
     }
     return EXIT_FAILURE;
   }
+
+  if (argc == 4) {
+    std::ifstream input(modelPath, std::ios::binary);
+    if (!input) {
+      std::cerr << "failed to read ONNX model\n";
+      return EXIT_FAILURE;
+    }
+    std::string contents(std::istreambuf_iterator<char>{input}, {});
+    constexpr std::string_view supportedArchitecture = "tanh-mlp-64x64";
+    constexpr std::string_view unsupportedArchitecture = "unsupported-v1";
+    static_assert(supportedArchitecture.size() ==
+                  unsupportedArchitecture.size());
+    const auto architecture = contents.find(supportedArchitecture);
+    if (architecture == std::string::npos) {
+      std::cerr << "ONNX model does not contain the supported architecture\n";
+      return EXIT_FAILURE;
+    }
+    contents.replace(architecture, supportedArchitecture.size(),
+                     unsupportedArchitecture);
+
+    const auto invalidModelPath = std::filesystem::path(argv[3]);
+    std::ofstream output(invalidModelPath, std::ios::binary | std::ios::trunc);
+    output.write(contents.data(),
+                 static_cast<std::streamsize>(contents.size()));
+    output.close();
+    if (!output) {
+      std::cerr << "failed to write invalid ONNX model\n";
+      return EXIT_FAILURE;
+    }
+
+    auto invalid = loadPolicyModel(invalidModelPath, target->fingerprint,
+                                   MQT_PREDICTOR_CORE_REVISION);
+    std::filesystem::remove(invalidModelPath);
+    if (invalid) {
+      std::cerr << "ONNX model accepted an unsupported architecture\n";
+      return EXIT_FAILURE;
+    }
+    const auto diagnostic = llvm::toString(invalid.takeError());
+    if (diagnostic.find(
+            "architecture metadata does not match the supported actor") ==
+        std::string::npos) {
+      std::cerr << diagnostic << '\n';
+      return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
+  }
+
   auto model = LinearPolicyModel::load(modelPath, target->fingerprint,
                                        MQT_PREDICTOR_CORE_REVISION);
   if (!model) {
