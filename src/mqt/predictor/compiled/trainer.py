@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
+from gymnasium.spaces import Box
+from gymnasium.spaces import Dict as DictSpace
 
 from .onnx_policy import TanhMlpPolicy
 from .policy import ACTION_NAMES, FEATURE_NAMES, LinearPolicy
@@ -69,25 +71,73 @@ class TrainingResult:
     accuracy: float
 
 
-def extract_maskable_ppo_policy(model: MaskablePPO) -> LinearPolicy | TanhMlpPolicy:
-    """Extract a direct-linear or one-hidden-layer Tanh PPO actor."""
+def _is_v3_observation_space(observation_space: object) -> bool:
+    if not isinstance(observation_space, DictSpace) or tuple(observation_space.spaces) != FEATURE_NAMES:
+        return False
+    return all(
+        isinstance(space, Box)
+        and space.shape == (1,)
+        and space.dtype == np.dtype(np.float32)
+        and np.array_equal(space.low, np.zeros(1, dtype=np.float32))
+        and np.array_equal(space.high, np.ones(1, dtype=np.float32))
+        for space in observation_space.spaces.values()
+    )
+
+
+def extract_maskable_ppo_policy(model: MaskablePPO) -> TanhMlpPolicy:
+    """Extract the exact default two-layer Tanh actor used by Predictor v3."""
     policy = model.policy
+    if not _is_v3_observation_space(policy.observation_space):
+        msg = "MaskablePPO observations do not match the named Predictor v3 features"
+        raise ValueError(msg)
+    if type(policy.features_extractor).__name__ != "CombinedExtractor" or policy.features_extractor.features_dim != len(
+        FEATURE_NAMES
+    ):
+        msg = "MaskablePPO must concatenate the named Predictor v3 features"
+        raise ValueError(msg)
+    if policy.ortho_init is not True:
+        msg = "MaskablePPO must retain orthogonal policy initialization"
+        raise ValueError(msg)
     policy_net = policy.mlp_extractor.policy_net
+    value_net = policy.mlp_extractor.value_net
     action_net = policy.action_net
+    critic_net = policy.value_net
+    expected_modules = ("Linear", "Tanh", "Linear", "Tanh")
+    if tuple(type(module).__name__ for module in policy_net) != expected_modules:
+        msg = "MaskablePPO actor must contain two 64-unit Tanh hidden layers"
+        raise ValueError(msg)
+    if tuple(type(module).__name__ for module in value_net) != expected_modules:
+        msg = "MaskablePPO critic must contain two 64-unit Tanh hidden layers"
+        raise ValueError(msg)
+
+    first_hidden = policy_net[0]
+    second_hidden = policy_net[2]
+    first_value_hidden = value_net[0]
+    second_value_hidden = value_net[2]
+    actor_shapes = (
+        (first_hidden.in_features, first_hidden.out_features),
+        (second_hidden.in_features, second_hidden.out_features),
+        (action_net.in_features, action_net.out_features),
+    )
+    critic_shapes = (
+        (first_value_hidden.in_features, first_value_hidden.out_features),
+        (second_value_hidden.in_features, second_value_hidden.out_features),
+        (critic_net.in_features, critic_net.out_features),
+    )
+    if actor_shapes != ((len(FEATURE_NAMES), 64), (64, 64), (64, len(ACTION_NAMES))):
+        msg = "MaskablePPO actor dimensions do not match the Predictor v3 policy"
+        raise ValueError(msg)
+    if critic_shapes != ((len(FEATURE_NAMES), 64), (64, 64), (64, 1)):
+        msg = "MaskablePPO critic dimensions do not match the Predictor v3 policy"
+        raise ValueError(msg)
+
     output_weights = cast("Tensor", action_net.weight).detach().cpu().numpy()
     output_bias = cast("Tensor", action_net.bias).detach().cpu().numpy()
-    if len(policy_net) == 0:
-        return LinearPolicy(
-            weights=np.asarray(output_weights, dtype=np.float32),
-            bias=np.asarray(output_bias, dtype=np.float32),
-        )
-    if len(policy_net) != 2 or type(policy_net[0]).__name__ != "Linear" or type(policy_net[1]).__name__ != "Tanh":
-        msg = "MaskablePPO actor must be linear or contain one Tanh hidden layer"
-        raise ValueError(msg)
-    hidden = policy_net[0]
     return TanhMlpPolicy(
-        hidden_weights=np.asarray(cast("Tensor", hidden.weight).detach().cpu().numpy(), dtype=np.float32),
-        hidden_bias=np.asarray(cast("Tensor", hidden.bias).detach().cpu().numpy(), dtype=np.float32),
+        first_hidden_weights=np.asarray(cast("Tensor", first_hidden.weight).detach().cpu().numpy(), dtype=np.float32),
+        first_hidden_bias=np.asarray(cast("Tensor", first_hidden.bias).detach().cpu().numpy(), dtype=np.float32),
+        second_hidden_weights=np.asarray(cast("Tensor", second_hidden.weight).detach().cpu().numpy(), dtype=np.float32),
+        second_hidden_bias=np.asarray(cast("Tensor", second_hidden.bias).detach().cpu().numpy(), dtype=np.float32),
         output_weights=np.asarray(output_weights, dtype=np.float32),
         output_bias=np.asarray(output_bias, dtype=np.float32),
     )
@@ -96,49 +146,43 @@ def extract_maskable_ppo_policy(model: MaskablePPO) -> LinearPolicy | TanhMlpPol
 def train_maskable_ppo(
     env: Env,
     *,
-    timesteps: int = 2,
+    timesteps: int = 1000,
     seed: int = 7,
-    hidden_dim: int = 16,
-    rollout_steps: int | None = None,
+    n_steps: int = 2048,
     batch_size: int = 64,
-    n_epochs: int = 1,
+    n_epochs: int = 10,
     learning_rate: float = 3e-4,
-) -> LinearPolicy | TanhMlpPolicy:
-    """Train a compact MaskablePPO actor matching the compiled ONNX ABI."""
+) -> TanhMlpPolicy:
+    """Train the Predictor-v3-shaped MaskablePPO policy for ONNX export."""
     if (
-        timesteps < 2
+        timesteps <= 0
         or seed < 0
-        or not 0 <= hidden_dim <= 64
-        or (rollout_steps is not None and not 2 <= rollout_steps <= timesteps)
+        or n_steps < 2
         or batch_size < 2
+        or batch_size > n_steps
         or n_epochs <= 0
         or not np.isfinite(learning_rate)
         or learning_rate <= 0
     ):
         msg = "MaskablePPO training parameters are invalid"
         raise ValueError(msg)
-    if env.observation_space.shape != (len(FEATURE_NAMES),) or getattr(env.action_space, "n", None) != len(
-        ACTION_NAMES
-    ):
+    if not _is_v3_observation_space(env.observation_space) or getattr(env.action_space, "n", None) != len(ACTION_NAMES):
         msg = "training environment does not match the compiled policy ABI"
         raise ValueError(msg)
 
     from sb3_contrib import MaskablePPO  # ruff: ignore[import-outside-top-level]
+    from sb3_contrib.common.maskable.policies import (  # ruff: ignore[import-outside-top-level]
+        MaskableMultiInputActorCriticPolicy,
+    )
 
-    effective_rollout_steps = timesteps if rollout_steps is None else rollout_steps
-    effective_batch_size = min(batch_size, effective_rollout_steps)
     model = MaskablePPO(
-        "MlpPolicy",
+        MaskableMultiInputActorCriticPolicy,
         env,
-        n_steps=effective_rollout_steps,
-        batch_size=effective_batch_size,
+        n_steps=n_steps,
+        batch_size=batch_size,
         n_epochs=n_epochs,
         gamma=0.98,
         learning_rate=learning_rate,
-        policy_kwargs={
-            "net_arch": {"pi": [] if hidden_dim == 0 else [hidden_dim], "vf": []},
-            "ortho_init": False,
-        },
         verbose=0,
         seed=seed,
         device="cpu",

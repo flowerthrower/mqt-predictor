@@ -10,7 +10,6 @@
 
 #include "mqt/predictor/mlir/Policy.h"
 
-#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <limits>
@@ -31,7 +30,7 @@ constexpr auto WEIGHTS = [] {
 }();
 
 constexpr auto BIASES =
-    std::array<float, NUM_ACTIONS>{0.05F, 0.04F, 0.02F, 0.11F, 0.10F, 1.00F};
+    std::array<float, NUM_ACTIONS>{0.05F, 0.04F, 0.02F, 3.00F, 2.00F, 4.00F};
 
 [[nodiscard]] constexpr std::size_t index(const Action action) {
   return static_cast<std::size_t>(action);
@@ -47,14 +46,11 @@ std::string_view actionName(const Action action) {
   return ACTION_NAMES[actionIndex];
 }
 
-ActionMask legalActions(const CompilerState& state,
-                        const ActionMask& suppressed) {
-  ActionMask legal{};
-  std::transform(suppressed.begin(), suppressed.end(), legal.begin(),
-                 [](const bool isSuppressed) { return !isSuppressed; });
-  legal[index(Action::PlaceAndRoute)] &= !state.mapped;
-  legal[index(Action::SynthesizeForTarget)] &= !state.synthesized;
-  legal[index(Action::Terminate)] &=
+ActionMask legalActions(const CompilerState& state) {
+  ActionMask legal{true, true, true, true, true, false};
+  legal[index(Action::PlaceAndRoute)] = !state.mapped;
+  legal[index(Action::SynthesizeForTarget)] = !state.synthesized;
+  legal[index(Action::Terminate)] =
       state.mapped && state.routed && state.synthesized;
   return legal;
 }

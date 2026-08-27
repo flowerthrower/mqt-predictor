@@ -123,7 +123,7 @@ if(BUILD_TESTING)
   add_test(
     NAME mqt-predictor-model-e2e
     COMMAND
-      mqt-predictor-cc --trace
+      mqt-predictor-cc --trace --deterministic-policy
       --target=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-target.json
       --model=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-policy.json -o
       ${CMAKE_CURRENT_BINARY_DIR}/bell-model.mlir
@@ -133,11 +133,25 @@ if(BUILD_TESTING)
     PROPERTIES PASS_REGULAR_EXPRESSION "policy=model.*action=terminate"
                FAIL_REGULAR_EXPRESSION "falling back;error:")
 
+  add_test(
+    NAME mqt-predictor-stochastic-default-e2e
+    COMMAND
+      mqt-predictor-cc --trace --max-steps=1
+      --target=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-target.json
+      --model=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-policy.json -o
+      ${CMAKE_CURRENT_BINARY_DIR}/bell-stochastic.mlir
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/bell.qasm)
+  set_tests_properties(
+    mqt-predictor-stochastic-default-e2e
+    PROPERTIES PASS_REGULAR_EXPRESSION
+               "sampling=stochastic sampling_seed=entropy"
+               FAIL_REGULAR_EXPRESSION "error:")
+
   if(MQT_PREDICTOR_ENABLE_ONNX)
     add_test(
       NAME mqt-predictor-onnx-model-e2e
       COMMAND
-        mqt-predictor-cc --trace
+        mqt-predictor-cc --trace --deterministic-policy
         --target=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-target.json
         --model=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-policy.onnx -o
         ${CMAKE_CURRENT_BINARY_DIR}/bell-onnx-model.mlir
@@ -152,7 +166,7 @@ if(BUILD_TESTING)
     add_test(
       NAME mqt-predictor-iqm-garnet-onnx-model-e2e
       COMMAND
-        mqt-predictor-cc --trace --max-steps=20
+        mqt-predictor-cc --trace --deterministic-policy --max-steps=20
         --qdmi-device=mqt.sc.iqm.garnet
         --model=${CMAKE_CURRENT_SOURCE_DIR}/models/iqm-garnet-ppo-tanh16.onnx
         -o ${CMAKE_CURRENT_BINARY_DIR}/qft-4-iqm-garnet-onnx-model.mlir
@@ -168,7 +182,7 @@ if(BUILD_TESTING)
   add_test(
     NAME mqt-predictor-register-model-e2e
     COMMAND
-      mqt-predictor-cc --trace --max-steps=20
+      mqt-predictor-cc --trace --deterministic-policy --max-steps=20
       --target=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-target.json
       --model=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-policy.json -o
       ${CMAKE_CURRENT_BINARY_DIR}/register-model.mlir
@@ -181,7 +195,7 @@ if(BUILD_TESTING)
   add_test(
     NAME mqt-predictor-model-native-input-state-e2e
     COMMAND
-      mqt-predictor-cc --trace
+      mqt-predictor-cc --trace --deterministic-policy
       --target=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-target.json
       --model=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-policy.json -o
       ${CMAKE_CURRENT_BINARY_DIR}/native-line-model.mlir
@@ -215,7 +229,7 @@ if(BUILD_TESTING)
     mqt-predictor-bootstrap-e2e
     PROPERTIES
       PASS_REGULAR_EXPRESSION
-      "step=5.*features=\\{.*critical_depth=1[.]000000e[+]00.*cx=3[.]750000e-01.*depth=1[.]505150e-01.*entanglement_ratio=8[.]000000e-01.*liveness=5[.]714286e-01.*measure=3[.]750000e-01.*num_qubits=7[.]500000e-01.*program_communication=6[.]666667e-01.*swap=1[.]250000e-01.*u2=1[.]250000e-01.*step_fraction=2[.]500000e-01,merge-single-qubit-rotation-gates_count=1[.]500000e-01,fuse-single-qubit-unitary-runs_count=0[.]000000e[+]00,fuse-two-qubit-gates_count=5[.]000000e-02,place-and-route_count=5[.]000000e-02,synthesize-for-target_count=0[.]000000e[+]00\\}"
+      "step=2 action=terminate.*features=\\{c3sqrtx=.*z="
       FAIL_REGULAR_EXPRESSION "falling back;error:")
 
   add_test(
@@ -227,7 +241,7 @@ if(BUILD_TESTING)
   set_tests_properties(
     mqt-predictor-rotations-e2e
     PROPERTIES
-      PASS_REGULAR_EXPRESSION "action=merge-single-qubit-rotation-gates"
+      PASS_REGULAR_EXPRESSION "step=0 action=place-and-route"
       FAIL_REGULAR_EXPRESSION "falling back;error:")
 
   add_test(
@@ -238,7 +252,7 @@ if(BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/wide.qasm)
   set_tests_properties(
     mqt-predictor-wide-e2e
-    PROPERTIES PASS_REGULAR_EXPRESSION "schema=mqt-predictor-core-stages/2"
+    PROPERTIES PASS_REGULAR_EXPRESSION "schema=mqt-predictor-core-stages/3"
                FAIL_REGULAR_EXPRESSION "unsupported QCO structure;error:")
 
   add_test(
@@ -265,6 +279,19 @@ if(BUILD_TESTING)
     PROPERTIES
       PASS_REGULAR_EXPRESSION
       "features=\\{.*cu3=2[.]500000e-01.*measure=5[.]000000e-01.*p=2[.]500000e-01"
+      FAIL_REGULAR_EXPRESSION "unsupported QCO structure;error:")
+
+  add_test(
+    NAME mqt-predictor-from-qiskit-qco-feature-e2e
+    COMMAND
+      mqt-predictor-cc --trace --target-qubits=4 -o
+      ${CMAKE_CURRENT_BINARY_DIR}/controlled-u-from-qiskit-output.mlir
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/controlled-u-from-qiskit.mlir)
+  set_tests_properties(
+    mqt-predictor-from-qiskit-qco-feature-e2e
+    PROPERTIES
+      PASS_REGULAR_EXPRESSION
+      "features=\\{.*cu3=3[.]333333e-01.*measure=6[.]666667e-01.*p=0[.]000000e[+]00"
       FAIL_REGULAR_EXPRESSION "unsupported QCO structure;error:")
 
   add_test(
@@ -308,20 +335,33 @@ if(BUILD_TESTING)
   set_tests_properties(
     mqt-predictor-budget-termination-e2e
     PROPERTIES
-      PASS_REGULAR_EXPRESSION "falling back to Core's canonical target pipeline"
+      PASS_REGULAR_EXPRESSION
+      "bootstrap episode truncated after 1 policy decisions"
       FAIL_REGULAR_EXPRESSION "error:")
 
   add_test(
-    NAME mqt-predictor-budget-reserves-stages-e2e
+    NAME mqt-predictor-horizon-truncates-before-termination-e2e
     COMMAND
       mqt-predictor-cc --trace --max-steps=2 --target-qubits=4 -o
       ${CMAKE_CURRENT_BINARY_DIR}/bell-budget-stages.mlir
       ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/bell.qasm)
   set_tests_properties(
-    mqt-predictor-budget-reserves-stages-e2e
+    mqt-predictor-horizon-truncates-before-termination-e2e
     PROPERTIES
-      PASS_REGULAR_EXPRESSION "step=2 action=terminate"
-      FAIL_REGULAR_EXPRESSION "falling back;error:")
+      PASS_REGULAR_EXPRESSION
+      "bootstrap episode truncated after 2 policy decisions"
+      FAIL_REGULAR_EXPRESSION "step=2 action=terminate;error:")
+
+  add_test(
+    NAME mqt-predictor-horizon-counts-termination-e2e
+    COMMAND
+      mqt-predictor-cc --trace --max-steps=3 --target-qubits=4 -o
+      ${CMAKE_CURRENT_BINARY_DIR}/bell-budget-termination.mlir
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/bell.qasm)
+  set_tests_properties(
+    mqt-predictor-horizon-counts-termination-e2e
+    PROPERTIES PASS_REGULAR_EXPRESSION "step=2 action=terminate"
+               FAIL_REGULAR_EXPRESSION "falling back;truncated;error:")
 
   add_test(
     NAME mqt-predictor-rejects-pass-budget

@@ -57,6 +57,17 @@ int main(const int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
+  std::mt19937_64 firstGenerator(11);
+  std::mt19937_64 secondGenerator(11);
+  const auto firstSample = model->sample(features, legal, firstGenerator);
+  const auto secondSample = model->sample(features, legal, secondGenerator);
+  if (!firstSample || !secondSample ||
+      firstSample->action != secondSample->action ||
+      firstSample->logits != secondSample->logits) {
+    std::cerr << "seeded stochastic inference is not reproducible\n";
+    return EXIT_FAILURE;
+  }
+
   auto builtIn = createLineTarget(4);
   if (!builtIn) {
     std::cerr << llvm::toString(builtIn.takeError()) << '\n';

@@ -18,6 +18,7 @@
 #include <mlir/Compiler/QDMIAdapter.h>
 
 #include <algorithm>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -73,25 +74,110 @@ void appendString(std::vector<std::uint8_t>& bytes,
   bytes.insert(bytes.end(), value.bytes_begin(), value.bytes_end());
 }
 
+void appendDouble(std::vector<std::uint8_t>& bytes, const double value) {
+  const auto normalized = value == 0.0 ? 0.0 : value;
+  appendUnsigned(bytes, std::bit_cast<std::uint64_t>(normalized));
+}
+
+void appendOptionalUnsigned(std::vector<std::uint8_t>& bytes,
+                            const std::optional<std::uint64_t> value) {
+  bytes.push_back(value ? 1 : 0);
+  if (value) {
+    appendUnsigned(bytes, *value);
+  }
+}
+
+void appendOptionalDouble(std::vector<std::uint8_t>& bytes,
+                          const std::optional<double> value) {
+  bytes.push_back(value ? 1 : 0);
+  if (value) {
+    appendDouble(bytes, *value);
+  }
+}
+
+void appendOptionalString(std::vector<std::uint8_t>& bytes,
+                          const std::optional<llvm::StringRef> value) {
+  bytes.push_back(value ? 1 : 0);
+  if (value) {
+    appendString(bytes, *value);
+  }
+}
+
+struct SiteTupleDescription {
+  std::vector<std::uint64_t> sites;
+  std::optional<std::uint64_t> duration;
+  std::optional<double> fidelity;
+
+  [[nodiscard]] friend bool operator<(const SiteTupleDescription& lhs,
+                                      const SiteTupleDescription& rhs) {
+    return std::tie(lhs.sites, lhs.duration, lhs.fidelity) <
+           std::tie(rhs.sites, rhs.duration, rhs.fidelity);
+  }
+};
+
+struct OperationDescription {
+  std::string name;
+  std::size_t numQubits;
+  std::size_t numParameters;
+  std::optional<std::uint64_t> duration;
+  std::optional<double> fidelity;
+  std::vector<SiteTupleDescription> siteTuples;
+
+  [[nodiscard]] friend bool operator<(const OperationDescription& lhs,
+                                      const OperationDescription& rhs) {
+    return std::tie(lhs.name, lhs.numQubits, lhs.numParameters, lhs.duration,
+                    lhs.fidelity, lhs.siteTuples) <
+           std::tie(rhs.name, rhs.numQubits, rhs.numParameters, rhs.duration,
+                    rhs.fidelity, rhs.siteTuples);
+  }
+};
+
+[[nodiscard]] OperationDescription
+describeOperation(const Target::Operation& operation) {
+  OperationDescription description{.name = operation.canonicalName().str(),
+                                   .numQubits = operation.numQubits(),
+                                   .numParameters = operation.numParameters(),
+                                   .duration = operation.duration(),
+                                   .fidelity = operation.fidelity()};
+  description.siteTuples.reserve(operation.siteTuples().size());
+  for (const auto& siteTuple : operation.siteTuples()) {
+    SiteTupleDescription tuple{.duration = siteTuple.duration(),
+                               .fidelity = siteTuple.fidelity()};
+    tuple.sites.reserve(siteTuple.sites().size());
+    for (const auto site : siteTuple.sites()) {
+      tuple.sites.emplace_back(static_cast<std::uint64_t>(site));
+    }
+    description.siteTuples.emplace_back(std::move(tuple));
+  }
+  std::ranges::sort(description.siteTuples,
+                    [](const auto& lhs, const auto& rhs) { return lhs < rhs; });
+  return description;
+}
+
 } // namespace
 
 std::string compilerTargetFingerprint(const Target& target) {
   std::vector<std::uint8_t> bytes;
   constexpr llvm::StringLiteral fingerprintSchema =
-      "mqt-compiler-target-fingerprint/1";
+      "mqt-compiler-target-fingerprint/2";
   bytes.insert(bytes.end(), fingerprintSchema.bytes_begin(),
                fingerprintSchema.bytes_end());
   bytes.push_back(0);
 
-  if (const auto name = target.name()) {
+  appendOptionalString(bytes, target.name());
+  if (const auto& durationUnit = target.durationUnit()) {
     bytes.push_back(1);
-    appendString(bytes, *name);
+    appendString(bytes, durationUnit->unit());
+    appendDouble(bytes, durationUnit->scaleFactor());
   } else {
     bytes.push_back(0);
   }
   appendUnsigned(bytes, target.sites().size());
   for (const auto& site : target.sites()) {
     appendUnsigned(bytes, static_cast<std::uint64_t>(site.id()));
+    appendOptionalString(bytes, site.name());
+    appendOptionalUnsigned(bytes, site.t1());
+    appendOptionalUnsigned(bytes, site.t2());
   }
 
   bytes.push_back(target.hasExplicitTopology() ? 1 : 0);
@@ -105,26 +191,29 @@ std::string compilerTargetFingerprint(const Target& target) {
 
   bytes.push_back(target.hasExplicitOperations() ? 1 : 0);
   if (target.hasExplicitOperations()) {
-    struct OperationDescription {
-      std::string name;
-      std::size_t numQubits;
-      std::size_t numParameters;
-    };
     std::vector<OperationDescription> operations;
     operations.reserve(target.operations().size());
     for (const auto& operation : target.operations()) {
-      operations.emplace_back(operation.canonicalName().str(),
-                              operation.numQubits(), operation.numParameters());
+      operations.emplace_back(describeOperation(operation));
     }
-    std::ranges::sort(operations, {}, [](const auto& operation) {
-      return std::tie(operation.name, operation.numQubits,
-                      operation.numParameters);
-    });
+    std::ranges::sort(
+        operations, [](const auto& lhs, const auto& rhs) { return lhs < rhs; });
     appendUnsigned(bytes, operations.size());
     for (const auto& operation : operations) {
       appendString(bytes, operation.name);
       appendUnsigned(bytes, operation.numQubits);
       appendUnsigned(bytes, operation.numParameters);
+      appendOptionalUnsigned(bytes, operation.duration);
+      appendOptionalDouble(bytes, operation.fidelity);
+      appendUnsigned(bytes, operation.siteTuples.size());
+      for (const auto& siteTuple : operation.siteTuples) {
+        appendUnsigned(bytes, siteTuple.sites.size());
+        for (const auto site : siteTuple.sites) {
+          appendUnsigned(bytes, site);
+        }
+        appendOptionalUnsigned(bytes, siteTuple.duration);
+        appendOptionalDouble(bytes, siteTuple.fidelity);
+      }
     }
   }
 

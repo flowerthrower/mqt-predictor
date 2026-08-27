@@ -46,7 +46,7 @@ struct CircuitAnalysis {
  * placement materializes otherwise unused device sites.
  *
  * Tensor-backed qubit registers and quantum control flow deliberately return
- * failure in schema v2. The predictor pass then uses the canonical Core
+ * failure in schema v3. The predictor pass then uses the canonical Core
  * pipeline as its safe fallback.
  */
 [[nodiscard]] ::mlir::FailureOr<CircuitAnalysis>

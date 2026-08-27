@@ -37,7 +37,7 @@ namespace mqt::predictor::compiler {
 namespace {
 
 using SiteId = ::mlir::CompilerTarget::SiteId;
-using OperationCounts = std::array<std::size_t, NUM_V3_FEATURES>;
+using OperationCounts = std::array<std::size_t, NUM_FEATURES>;
 
 constexpr std::size_t CRITICAL_DEPTH_INDEX = 6;
 constexpr std::size_t DEPTH_INDEX = 18;
@@ -68,7 +68,7 @@ struct WireState {
 
 void recordNamedOperation(OperationCounts& counts,
                           const llvm::StringRef operationName) {
-  for (std::size_t index = 0; index < NUM_V3_FEATURES; ++index) {
+  for (std::size_t index = 0; index < NUM_FEATURES; ++index) {
     const auto featureName = FEATURE_NAMES[index];
     if (operationName ==
         llvm::StringRef(featureName.data(), featureName.size())) {
@@ -470,7 +470,7 @@ analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target,
 
   FeatureVector values{};
   if (totalOperations > 0) {
-    for (std::size_t index = 0; index < NUM_V3_FEATURES; ++index) {
+    for (std::size_t index = 0; index < NUM_FEATURES; ++index) {
       values[index] = clampUnit(static_cast<double>(operationCounts[index]) /
                                 static_cast<double>(totalOperations));
     }

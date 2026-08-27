@@ -28,7 +28,7 @@
 
 namespace {
 
-using mqt::predictor::compiler::MAX_TRANSFORM_PASSES;
+using mqt::predictor::compiler::MAX_STEPS;
 using mqt::predictor::compiler::PolicyMode;
 using mqt::predictor::compiler::PredictorOptions;
 
@@ -53,9 +53,10 @@ void printHelp(llvm::raw_ostream& output) {
          "  --target=<path>       Load a JSON compiler target\n"
          "  --qdmi-device=<id>    Snapshot a registered QDMI compiler target\n"
          "  --target-qubits=<n>   Built-in line target size (default: 5)\n"
-         "  --max-steps=<n>       Maximum transformation passes (default: 20)\n"
-         "  --sample-policy       Sample model actions for RL training\n"
-         "  --sampling-seed=<n>   Seed for sampled model actions (default: 0)\n"
+         "  --max-steps=<n>       Maximum policy decisions (default: 20)\n"
+         "  --deterministic-policy\n"
+         "                         Select the highest-logit model action\n"
+         "  --sampling-seed=<n>   Seed sampled actions (default: entropy)\n"
          "  --trace               Print features, states, and actions\n"
          "  --help                Show this help\n";
 }
@@ -84,8 +85,8 @@ parseSize(const std::string_view value) {
       options.predictor.trace = true;
       continue;
     }
-    if (argument == "--sample-policy") {
-      options.predictor.samplePolicy = true;
+    if (argument == "--deterministic-policy") {
+      options.predictor.deterministicPolicy = true;
       continue;
     }
     if (argument == "-o") {
@@ -157,9 +158,9 @@ parseSize(const std::string_view value) {
       const auto value =
           argument.substr(std::string_view("--max-steps=").size());
       const auto parsed = parseSize(value);
-      if (!parsed || *parsed == 0 || *parsed > MAX_TRANSFORM_PASSES) {
-        llvm::errs() << "--max-steps must be between 1 and "
-                     << MAX_TRANSFORM_PASSES << '\n';
+      if (!parsed || *parsed == 0 || *parsed > MAX_STEPS) {
+        llvm::errs() << "--max-steps must be between 1 and " << MAX_STEPS
+                     << '\n';
         return std::nullopt;
       }
       options.predictor.maxSteps = *parsed;
@@ -203,9 +204,9 @@ parseSize(const std::string_view value) {
     llvm::errs() << "--policy=model requires --model=<path>\n";
     return std::nullopt;
   }
-  if (options.predictor.samplePolicy &&
+  if (options.predictor.deterministicPolicy &&
       options.predictor.policy != PolicyMode::Model) {
-    llvm::errs() << "--sample-policy requires --model=<path>\n";
+    llvm::errs() << "--deterministic-policy requires --model=<path>\n";
     return std::nullopt;
   }
   const auto explicitTargets =

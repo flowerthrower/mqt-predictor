@@ -10,24 +10,31 @@
 
 from __future__ import annotations
 
-import hashlib
+import contextlib
+import copy
 import importlib
 import math
-from dataclasses import asdict
+import signal
+import threading
+import time
+import warnings
 from typing import TYPE_CHECKING, Protocol, cast
 
 import numpy as np
 from gymnasium import Env
-from gymnasium.spaces import Box, Discrete
+from gymnasium.spaces import Box, Dict, Discrete
 
-from .native_rl import PASS_PENALTY, CompileMetrics
-from .policy import ACTION_NAMES, FEATURE_NAMES, MAX_PASSES, V3_FEATURE_NAMES, V3_OPERATION_NAMES
+from mqt.predictor.reward import expected_fidelity
+
+from .policy import ACTION_NAMES, FEATURE_NAMES, MAX_STEPS, V3_OPERATION_NAMES
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
+    from types import FrameType
 
     from numpy.typing import NDArray
     from qiskit import QuantumCircuit
+    from qiskit.transpiler import Target
 
 
 NUM_TRANSFORM_ACTIONS = len(ACTION_NAMES) - 1
@@ -69,8 +76,6 @@ class _QCOProgram(Protocol):
 
     def verify_target_conformance(self, target: object) -> None: ...
 
-    def compile_for_target(self, target: object) -> None: ...
-
     def to_qc(self) -> _QCProgram: ...
 
 
@@ -104,34 +109,69 @@ def _load_core_compiler() -> _CoreCompiler:
     return cast("_CoreCompiler", module)
 
 
-def _circuit_metrics(circuit: QuantumCircuit) -> CompileMetrics:
-    """Measure the structural objective on one target-compiled circuit."""
-    two_qubit_depth = circuit.depth(lambda instruction: instruction.operation.num_qubits == 2)
-    two_qubit = sum(instruction.operation.num_qubits == 2 for instruction in circuit.data)
-    gates = sum(
-        instruction.operation.num_qubits > 0
-        and instruction.operation.name not in {"barrier", "delay", "measure", "reset"}
-        for instruction in circuit.data
-    )
-    return CompileMetrics(
-        two_qubit_depth=two_qubit_depth,
-        two_qubit=two_qubit,
-        depth=circuit.depth(),
-        gates=gates,
-    )
+@contextlib.contextmanager
+def _enforce_pass_timeout(pass_timeout: float | None) -> Iterator[None]:
+    """Apply the same best-effort POSIX pass timeout as Predictor v3.
+
+    Python signal delivery cannot preempt a native pass that holds the GIL. A
+    hard deadline for such passes therefore still requires process isolation.
+    """
+    if pass_timeout is None:
+        yield
+        return
+
+    required = ("SIGALRM", "ITIMER_REAL", "getitimer", "setitimer")
+    if not all(hasattr(signal, attribute) for attribute in required):
+        warnings.warn("Pass timeouts are not supported on this platform.", RuntimeWarning, stacklevel=2)
+        yield
+        return
+    if threading.current_thread() is not threading.main_thread():
+        warnings.warn("Pass timeouts are only supported on the main thread.", RuntimeWarning, stacklevel=2)
+        yield
+        return
+
+    def timeout_handler(_signum: int, _frame: FrameType | None) -> None:
+        msg = f"Compilation pass exceeded the timeout of {pass_timeout:g} seconds."
+        raise TimeoutError(msg)
+
+    previous_delay, previous_interval = signal.getitimer(signal.ITIMER_REAL)
+    if 0 < previous_delay <= pass_timeout:
+        yield
+        return
+
+    previous_handler = signal.signal(signal.SIGALRM, timeout_handler)
+    start_time = time.monotonic()
+    try:
+        signal.setitimer(signal.ITIMER_REAL, pass_timeout)
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_delay > 0:
+            remaining_delay = max(previous_delay - (time.monotonic() - start_time), 1e-6)
+            signal.setitimer(signal.ITIMER_REAL, remaining_delay, previous_interval)
 
 
-def _score(metrics: CompileMetrics, baseline: CompileMetrics) -> float:
-    """Score target-compiled quality relative to Core's canonical pipeline."""
-    weighted_improvement = 0.0
-    for weight, candidate, reference in zip(
-        (1.0, 0.25, 0.1, 0.05),
-        (metrics.two_qubit_depth, metrics.two_qubit, metrics.depth, metrics.gates),
-        (baseline.two_qubit_depth, baseline.two_qubit, baseline.depth, baseline.gates),
-        strict=True,
-    ):
-        weighted_improvement += weight * (reference - candidate) / max(reference, 1)
-    return weighted_improvement
+def _prepare_reward_target(target: Target) -> Target:
+    """Copy a Qiskit target and complete only symmetric CZ calibrations.
+
+    Core can reverse the operands of a CZ without changing the physical gate.
+    Qiskit's expected-fidelity lookup is ordered, so mirror an existing CZ
+    property only when the opposite ordering is absent. No other operation is
+    assumed to be swap invariant.
+    """
+    prepared = copy.deepcopy(target)
+    try:
+        properties = prepared["cz"]
+    except KeyError:
+        return prepared
+    for qargs, instruction_properties in tuple(properties.items()):
+        if qargs is None or len(qargs) != 2:
+            continue
+        reverse = (qargs[1], qargs[0])
+        if reverse not in properties:
+            properties[reverse] = instruction_properties
+    return prepared
 
 
 def _structural_features(
@@ -192,15 +232,19 @@ class CorePredictorEnv(Env):
         self,
         circuits: Sequence[QuantumCircuit],
         target: _CompilerTarget,
+        reward_target: Target,
         *,
-        max_passes: int = MAX_PASSES,
+        max_steps: int = MAX_STEPS,
+        pass_timeout: float | None = None,
     ) -> None:
         """Initialize the Core-only pass-ordering environment.
 
         Args:
             circuits: Qiskit circuits sampled when an episode is reset.
             target: Core compiler target used for terminal compilation.
-            max_passes: Maximum number of transformation actions per episode.
+            reward_target: Qiskit target carrying the same device calibrations.
+            max_steps: Maximum number of actions, including termination, per episode.
+            pass_timeout: Best-effort timeout in seconds for one Core pass.
 
         Raises:
             ValueError: If the circuit corpus, target, or pass budget is invalid.
@@ -212,16 +256,23 @@ class CorePredictorEnv(Env):
         if target.num_qubits <= 0:
             msg = "The Core compiler target must contain at least one qubit."
             raise ValueError(msg)
-        if not 0 < max_passes <= MAX_PASSES:
-            msg = f"max_passes must be between 1 and {MAX_PASSES}."
+        if reward_target.num_qubits != target.num_qubits:
+            msg = "The Core compiler target and Qiskit reward target must describe the same number of qubits."
+            raise ValueError(msg)
+        if not 0 < max_steps <= MAX_STEPS:
+            msg = f"max_steps must be between 1 and {MAX_STEPS}."
             raise ValueError(msg)
 
         self._compiler = _load_core_compiler()
         self._circuits = tuple(circuit.copy() for circuit in circuits)
         self.target = target
-        self.max_passes = max_passes
+        self.reward_target = _prepare_reward_target(reward_target)
+        self.max_steps = max_steps
+        self.pass_timeout = pass_timeout
         self.action_space = Discrete(len(ACTION_NAMES))
-        self.observation_space = Box(low=0.0, high=1.0, shape=(len(FEATURE_NAMES),), dtype=np.float32)
+        self.observation_space = Dict({
+            name: Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32) for name in FEATURE_NAMES
+        })
 
         self._program: _QCOProgram | None = None
         self._mapped = False
@@ -229,13 +280,9 @@ class CorePredictorEnv(Env):
         self._synthesized = False
         self._circuit_index = 0
         self._num_qubits = 0
-        self._num_passes = 0
-        self._action_counts = np.zeros(NUM_TRANSFORM_ACTIONS, dtype=np.int64)
-        self._attempted: set[tuple[str, int]] = set()
-        self._baseline_cache: dict[int, CompileMetrics] = {}
-        self._potential_cache: dict[tuple[int, str, bool, bool, bool], float] = {}
-        self._current_potential = 0.0
-        self._last_observation = np.zeros(len(FEATURE_NAMES), dtype=np.float32)
+        self._num_steps = 0
+        self._episode_ended = False
+        self._last_observation = {name: np.zeros(1, dtype=np.float32) for name in FEATURE_NAMES}
         self.used_actions: list[str] = []
 
     @property
@@ -247,50 +294,25 @@ class CorePredictorEnv(Env):
         return self._program
 
     @property
-    def num_passes(self) -> int:
-        """The number of transformation actions in this episode."""
-        return self._num_passes
+    def num_steps(self) -> int:
+        """The number of successful actions in this episode, including termination."""
+        return self._num_steps
 
-    def _fingerprint(self, program: _QCOProgram | None = None) -> str:
-        source = self.program if program is None else program
-        return hashlib.sha256(source.ir.encode()).hexdigest()
+    @property
+    def pass_timeout(self) -> float | None:
+        """The current best-effort per-pass timeout in seconds."""
+        return self._pass_timeout
+
+    @pass_timeout.setter
+    def pass_timeout(self, pass_timeout: float | None) -> None:
+        if pass_timeout is not None and pass_timeout <= 0:
+            msg = "pass_timeout must be positive."
+            raise ValueError(msg)
+        self._pass_timeout = pass_timeout
 
     def _as_qiskit(self, program: _QCOProgram, *, mapped: bool) -> QuantumCircuit:
         qc_program = program.copy().to_qc()
         return qc_program.to_qiskit(target=self.target if mapped else None)
-
-    def _metrics(self, program: _QCOProgram) -> CompileMetrics:
-        return _circuit_metrics(self._as_qiskit(program, mapped=True))
-
-    def _baseline(self, program: _QCOProgram | None = None) -> CompileMetrics:
-        if self._circuit_index not in self._baseline_cache:
-            source = self.program if program is None else program
-            candidate = source.copy()
-            candidate.compile_for_target(self.target)
-            self._baseline_cache[self._circuit_index] = self._metrics(candidate)
-        return self._baseline_cache[self._circuit_index]
-
-    def _potential(
-        self,
-        program: _QCOProgram,
-        *,
-        mapped: bool,
-        routed: bool,
-        synthesized: bool,
-    ) -> float:
-        """Score a state after completing it with the staged Core pipeline."""
-        key = (self._circuit_index, self._fingerprint(program), mapped, routed, synthesized)
-        if key not in self._potential_cache:
-            candidate = program.copy()
-            needs_synthesis = not synthesized
-            if not mapped or not routed:
-                candidate.place_and_route(self.target)
-                needs_synthesis = True
-            if needs_synthesis:
-                candidate.synthesize_for_target(self.target)
-            candidate.verify_target_conformance(self.target)
-            self._potential_cache[key] = _score(self._metrics(candidate), self._baseline(program))
-        return self._potential_cache[key]
 
     def _observation_for(
         self,
@@ -298,9 +320,7 @@ class CorePredictorEnv(Env):
         *,
         mapped: bool,
         num_qubits: int,
-        num_passes: int,
-        action_counts: NDArray[np.int64],
-    ) -> NDArray[np.float32]:
+    ) -> dict[str, NDArray[np.float32]]:
         circuit = self._as_qiskit(program, mapped=mapped)
         # Target-aware Core export materializes the full device register. Keep
         # the episode's logical width so these features match the C++ analysis.
@@ -328,12 +348,7 @@ class CorePredictorEnv(Env):
             "parallelism": parallelism,
             "program_communication": communication,
         }
-        values = [
-            *(v3_features[name] for name in V3_FEATURE_NAMES),
-            num_passes / MAX_PASSES,
-            *(count / MAX_PASSES for count in action_counts),
-        ]
-        return np.clip(np.asarray(values, dtype=np.float32), 0.0, 1.0)
+        return {name: np.clip(np.asarray([v3_features[name]], dtype=np.float32), 0.0, 1.0) for name in FEATURE_NAMES}
 
     def _is_conformant(self) -> bool:
         return self._mapped and self._routed and self._synthesized
@@ -350,7 +365,7 @@ class CorePredictorEnv(Env):
         *,
         seed: int | None = None,
         options: dict[str, object] | None = None,
-    ) -> tuple[NDArray[np.float32], dict[str, object]]:
+    ) -> tuple[dict[str, NDArray[np.float32]], dict[str, object]]:
         """Start an episode from one circuit in the configured corpus."""
         super().reset(seed=seed)
         requested_index = None if options is None else options.get("circuit_index")
@@ -369,52 +384,31 @@ class CorePredictorEnv(Env):
         program = self._compiler.QCProgram.from_qiskit(circuit).to_qco()
         program.cleanup()
         program.decompose_multi_controlled()
-        baseline = self._baseline(program)
-        action_counts = np.zeros(NUM_TRANSFORM_ACTIONS, dtype=np.int64)
         observation = self._observation_for(
             program,
             mapped=False,
             num_qubits=circuit.num_qubits,
-            num_passes=0,
-            action_counts=action_counts,
         )
-        potential = self._potential(program, mapped=False, routed=False, synthesized=False)
 
         self._program = program
         self._mapped = False
         self._routed = False
         self._synthesized = False
         self._num_qubits = circuit.num_qubits
-        self._num_passes = 0
-        self._action_counts = action_counts
-        self._attempted.clear()
-        self._current_potential = potential
+        self._num_steps = 0
+        self._episode_ended = False
         self._last_observation = observation
         self.used_actions = []
         return observation, {
-            "baseline": asdict(baseline),
             "circuit_index": self._circuit_index,
-            "potential": potential,
             **self._state_info(),
         }
 
     def action_masks(self) -> list[bool]:
-        """Return legal actions, suppressing no-op retries on identical IR."""
-        fingerprint = self._fingerprint()
-        transforms = [self._num_passes < self.max_passes] * NUM_TRANSFORM_ACTIONS
+        """Return actions permitted by the current compilation phase."""
+        transforms = [True] * NUM_TRANSFORM_ACTIONS
         transforms[PLACE_AND_ROUTE_ACTION] &= not self._mapped
         transforms[SYNTHESIZE_ACTION] &= not self._synthesized
-        for action in range(PLACE_AND_ROUTE_ACTION):
-            transforms[action] &= (fingerprint, action) not in self._attempted
-
-        remaining = self.max_passes - self._num_passes
-        if remaining == 2 and (not self._mapped or not self._routed):
-            transforms = [False] * NUM_TRANSFORM_ACTIONS
-            transforms[PLACE_AND_ROUTE_ACTION] = True
-        elif remaining == 1 and self._mapped and self._routed:
-            transforms = [False] * NUM_TRANSFORM_ACTIONS
-            if not self._synthesized:
-                transforms[SYNTHESIZE_ACTION] = True
         return [*transforms, self._is_conformant()]
 
     @staticmethod
@@ -443,19 +437,20 @@ class CorePredictorEnv(Env):
     def _failed_step(
         self,
         error: Exception,
-    ) -> tuple[NDArray[np.float32], float, bool, bool, dict[str, object]]:
-        return self._last_observation.copy(), -2.0, False, True, {"error": f"{type(error).__name__}: {error}"}
+    ) -> tuple[dict[str, NDArray[np.float32]], float, bool, bool, dict[str, object]]:
+        self._episode_ended = True
+        observation = {name: value.copy() for name, value in self._last_observation.items()}
+        return observation, 0.0, False, True, {"Truncated because of error": f"{type(error).__name__}: {error}"}
 
     def _evaluate_action(
         self,
         action: int,
-    ) -> tuple[_QCOProgram, NDArray[np.float32], NDArray[np.int64], bool, bool, bool, bool, float]:
+    ) -> tuple[_QCOProgram, dict[str, NDArray[np.float32]], bool, bool, bool, bool]:
         """Apply and evaluate one action without changing episode state."""
         before = self.program.ir
         candidate = self.program.copy()
-        candidate_counts = self._action_counts.copy()
-        candidate_counts[action] += 1
-        self._apply_action(candidate, action)
+        with _enforce_pass_timeout(self.pass_timeout):
+            self._apply_action(candidate, action)
         changed = before != candidate.ir
         candidate_mapped = self._mapped
         candidate_routed = self._routed
@@ -468,32 +463,25 @@ class CorePredictorEnv(Env):
             candidate_synthesized = False
         elif action == SYNTHESIZE_ACTION:
             candidate_synthesized = True
-        potential = self._potential(
-            candidate,
-            mapped=candidate_mapped,
-            routed=candidate_routed,
-            synthesized=candidate_synthesized,
-        )
         observation = self._observation_for(
             candidate,
             mapped=candidate_mapped,
             num_qubits=self._num_qubits,
-            num_passes=self._num_passes + 1,
-            action_counts=candidate_counts,
         )
         return (
             candidate,
             observation,
-            candidate_counts,
             changed,
             candidate_mapped,
             candidate_routed,
             candidate_synthesized,
-            potential,
         )
 
-    def step(self, action: int) -> tuple[NDArray[np.float32], float, bool, bool, dict[str, object]]:
+    def step(self, action: int) -> tuple[dict[str, NDArray[np.float32]], float, bool, bool, dict[str, object]]:
         """Apply one Core stage or verify an already conformant program."""
+        if self._episode_ended:
+            msg = "This episode has ended; call reset() before selecting another action."
+            raise RuntimeError(msg)
         if not self.action_space.contains(action):
             msg = f"Action {action} is not supported."
             raise ValueError(msg)
@@ -501,50 +489,41 @@ class CorePredictorEnv(Env):
         if not self.action_masks()[action]:
             msg = f"Action {ACTION_NAMES[action]} is not legal in the current state."
             raise ValueError(msg)
+        self.used_actions.append(ACTION_NAMES[action])
 
         if action == TERMINATE_ACTION:
             candidate = self.program.copy()
             try:
-                candidate.verify_target_conformance(self.target)
-                metrics = self._metrics(candidate)
-                observation = self._observation_for(
-                    candidate,
-                    mapped=True,
-                    num_qubits=self._num_qubits,
-                    num_passes=self._num_passes,
-                    action_counts=self._action_counts,
-                )
+                with _enforce_pass_timeout(self.pass_timeout):
+                    candidate.verify_target_conformance(self.target)
+                circuit = self._as_qiskit(candidate, mapped=True)
+                reward = expected_fidelity(circuit, self.reward_target)
+                observation = self._observation_for(candidate, mapped=True, num_qubits=self._num_qubits)
             except Exception as error:  # ruff:ignore[blind-except]
                 return self._failed_step(error)
             self._program = candidate
+            self._num_steps += 1
+            self._episode_ended = True
             self._last_observation = observation
-            self.used_actions.append(ACTION_NAMES[action])
-            reward = _score(metrics, self._baseline())
             return (
                 observation,
                 reward,
                 True,
                 False,
                 {
-                    "baseline": asdict(self._baseline()),
-                    "metrics": asdict(metrics),
-                    "passes": self._num_passes,
-                    "potential": reward,
+                    "steps": self._num_steps,
                     **self._state_info(),
                 },
             )
 
-        fingerprint = self._fingerprint()
         try:
             (
                 candidate,
                 observation,
-                candidate_counts,
                 changed,
                 candidate_mapped,
                 candidate_routed,
                 candidate_synthesized,
-                potential,
             ) = self._evaluate_action(action)
         except Exception as error:  # ruff:ignore[blind-except]
             return self._failed_step(error)
@@ -552,25 +531,18 @@ class CorePredictorEnv(Env):
         self._mapped = candidate_mapped
         self._routed = candidate_routed
         self._synthesized = candidate_synthesized
-        if action < PLACE_AND_ROUTE_ACTION:
-            self._attempted.add((fingerprint, action))
-        self._num_passes += 1
-        self._action_counts = candidate_counts
+        self._num_steps += 1
         self._last_observation = observation
-        self.used_actions.append(ACTION_NAMES[action])
-        reward = potential - self._current_potential - PASS_PENALTY
-        self._current_potential = potential
-        truncated = self._num_passes >= self.max_passes and not self._is_conformant()
-        if truncated:
-            reward -= 2.0
+        truncated = self._num_steps >= self.max_steps
+        self._episode_ended = truncated
         return (
             observation,
-            reward,
+            0.0,
             False,
             truncated,
             {
                 "changed": changed,
-                "potential": potential,
+                **({"truncation_reason": "max_steps_exceeded"} if truncated else {}),
                 **self._state_info(),
             },
         )

@@ -63,10 +63,6 @@ struct ExhaustiveCandidate {
   std::size_t index = 0;
 };
 
-[[nodiscard]] constexpr std::size_t actionIndex(const Action action) {
-  return static_cast<std::size_t>(action);
-}
-
 [[nodiscard]] std::string moduleFingerprint(::mlir::ModuleOp module) {
   std::string fingerprint;
   llvm::raw_string_ostream stream(fingerprint);
@@ -225,10 +221,9 @@ public:
   }
 
   void runOnOperation() final {
-    if (options_.maxSteps == 0 || options_.maxSteps > MAX_TRANSFORM_PASSES) {
+    if (options_.maxSteps == 0 || options_.maxSteps > MAX_STEPS) {
       getOperation().emitError()
-          << "maximum transformation passes must be between 1 and "
-          << MAX_TRANSFORM_PASSES;
+          << "maximum policy decisions must be between 1 and " << MAX_STEPS;
       signalPassFailure();
       return;
     }
@@ -463,10 +458,16 @@ private:
     CompilerState policyState{};
 
     BootstrapLinearPolicy policy;
-    std::mt19937_64 generator(options_.samplingSeed);
-    std::set<std::pair<std::string, std::size_t>> attemptedTransitions;
-    std::array<std::size_t, actionIndex(Action::Terminate)> actionCounts{};
-    for (std::size_t step = 0;;) {
+    std::mt19937_64 generator;
+    if (model != nullptr && !options_.deterministicPolicy &&
+        options_.samplingSeed) {
+      generator.seed(*options_.samplingSeed);
+    } else if (model != nullptr && !options_.deterministicPolicy) {
+      std::random_device entropy;
+      std::seed_seq seed{entropy(), entropy(), entropy(), entropy()};
+      generator.seed(seed);
+    }
+    for (std::size_t step = 0; step < options_.maxSteps; ++step) {
       auto analysis = analyzeCircuit(module, target, logicalQubits);
       if (failed(analysis)) {
         if (options_.trace) {
@@ -480,35 +481,12 @@ private:
       }
 
       const auto moduleBefore = moduleFingerprint(module);
-      constexpr auto denominator = static_cast<float>(MAX_TRANSFORM_PASSES);
-      analysis->features.values[STEP_FRACTION_INDEX] =
-          static_cast<float>(step) / denominator;
-      for (std::size_t action = 0; action < actionCounts.size(); ++action) {
-        analysis->features.values[ACTION_COUNT_FEATURE_OFFSET + action] =
-            static_cast<float>(actionCounts[action]) / denominator;
-      }
-      ActionMask suppressed{};
-      const auto remaining = options_.maxSteps - step;
-      const auto reserveMapping = remaining == 2 && (!analysis->state.mapped ||
-                                                     !analysis->state.routed);
-      const auto reserveFinalStage =
-          remaining == 1 && analysis->state.mapped && analysis->state.routed;
-      for (std::size_t action = 0; action < actionCounts.size(); ++action) {
-        const auto candidate = static_cast<Action>(action);
-        suppressed[action] =
-            step >= options_.maxSteps ||
-            (reserveMapping && candidate != Action::PlaceAndRoute) ||
-            (reserveFinalStage && (analysis->state.synthesized ||
-                                   candidate != Action::SynthesizeForTarget)) ||
-            (isOptimizationAction(candidate) &&
-             attemptedTransitions.contains({moduleBefore, action}));
-      }
-      const auto legal = legalActions(analysis->state, suppressed);
+      const auto legal = legalActions(analysis->state);
       const auto decision =
           model != nullptr
-              ? options_.samplePolicy
-                    ? model->sample(analysis->features.values, legal, generator)
-                    : model->select(analysis->features.values, legal)
+              ? options_.deterministicPolicy
+                    ? model->select(analysis->features.values, legal)
+                    : model->sample(analysis->features.values, legal, generator)
               : policy.select(analysis->features.values, legal);
       if (!decision) {
         return ::mlir::failure();
@@ -528,9 +506,6 @@ private:
       if (failed(runAction(module, decision->action, target))) {
         return ::mlir::failure();
       }
-      const auto selectedAction = actionIndex(decision->action);
-      attemptedTransitions.emplace(moduleBefore, selectedAction);
-      ++actionCounts[selectedAction];
       const auto changed = moduleBefore != moduleFingerprint(module);
       if (model != nullptr) {
         if (isOptimizationAction(decision->action) && changed) {
@@ -549,8 +524,17 @@ private:
                        << actionName(decision->action) << '\n';
         }
       }
-      ++step;
+      if (step + 1 == options_.maxSteps) {
+        if (options_.trace) {
+          llvm::errs() << "[mqt-predictor] "
+                       << (model == nullptr ? "bootstrap" : "model")
+                       << " episode truncated after " << options_.maxSteps
+                       << " policy decisions\n";
+        }
+        return ::mlir::failure();
+      }
     }
+    return ::mlir::failure();
   }
 
   [[nodiscard]] ::mlir::LogicalResult runAction(const ::mlir::ModuleOp module,
@@ -616,8 +600,16 @@ private:
         }
         llvm::errs() << " training=" << model->trainingAlgorithm()
                      << " objective=" << model->objective() << " sampling="
-                     << (options_.samplePolicy ? "stochastic" : "argmax")
-                     << " sampling_seed=" << options_.samplingSeed << '\n';
+                     << (options_.deterministicPolicy ? "argmax"
+                                                      : "stochastic");
+        if (!options_.deterministicPolicy) {
+          if (options_.samplingSeed) {
+            llvm::errs() << " sampling_seed=" << *options_.samplingSeed;
+          } else {
+            llvm::errs() << " sampling_seed=entropy";
+          }
+        }
+        llvm::errs() << '\n';
       }
     }
     llvm::errs() << "[mqt-predictor] step=" << step

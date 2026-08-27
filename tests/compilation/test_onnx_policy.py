@@ -57,21 +57,30 @@ def _export(path: Path) -> LinearPolicy:
 
 
 def _mlp_policy() -> TanhMlpPolicy:
-    hidden_weights = np.linspace(
-        -0.4,
-        0.4,
-        16 * len(FEATURE_NAMES),
+    first_hidden_weights = np.linspace(
+        -0.04,
+        0.04,
+        64 * len(FEATURE_NAMES),
         dtype=np.float32,
-    ).reshape(16, len(FEATURE_NAMES))
-    hidden_bias = np.linspace(-0.1, 0.1, 16, dtype=np.float32)
+    ).reshape(64, len(FEATURE_NAMES))
+    first_hidden_bias = np.linspace(-0.1, 0.1, 64, dtype=np.float32)
+    second_hidden_weights = np.linspace(-0.03, 0.03, 64 * 64, dtype=np.float32).reshape(64, 64)
+    second_hidden_bias = np.linspace(0.1, -0.1, 64, dtype=np.float32)
     output_weights = np.linspace(
         -0.3,
         0.3,
-        len(ACTION_NAMES) * 16,
+        len(ACTION_NAMES) * 64,
         dtype=np.float32,
-    ).reshape(len(ACTION_NAMES), 16)
+    ).reshape(len(ACTION_NAMES), 64)
     output_bias = np.linspace(-0.2, 0.2, len(ACTION_NAMES), dtype=np.float32)
-    return TanhMlpPolicy(hidden_weights, hidden_bias, output_weights, output_bias)
+    return TanhMlpPolicy(
+        first_hidden_weights,
+        first_hidden_bias,
+        second_hidden_weights,
+        second_hidden_bias,
+        output_weights,
+        output_bias,
+    )
 
 
 def test_onnx_dependency_is_loaded_only_for_export(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -133,6 +142,7 @@ def test_onnx_tanh_actor_round_trip_preserves_raw_logits(tmp_path: Path) -> None
         training_algorithm="test-tanh-mlp",
         objective="raw-logit parity",
     )
+    model = pytest.importorskip("onnx").load_model(str(path))
     features = np.linspace(0.0, 1.0, len(FEATURE_NAMES), dtype=np.float32)
 
     actual = load_onnx_policy(
@@ -142,6 +152,9 @@ def test_onnx_tanh_actor_round_trip_preserves_raw_logits(tmp_path: Path) -> None
     ).logits(features.tolist())
 
     np.testing.assert_allclose(actual, policy.logits(features.tolist()), rtol=1e-6, atol=1e-6)
+    metadata = {entry.key: entry.value for entry in model.metadata_props}
+    assert metadata["architecture"] == "tanh-mlp-64x64"
+    assert [node.op_type for node in model.graph.node] == ["Gemm", "Tanh", "Gemm", "Tanh", "Gemm"]
 
 
 def test_tanh_policy_rejects_invalid_features_and_logit_overflow() -> None:
@@ -151,13 +164,28 @@ def test_tanh_policy_rejects_invalid_features_and_logit_overflow() -> None:
         policy.logits([2.0] * len(FEATURE_NAMES))
 
     overflowing = TanhMlpPolicy(
-        np.ones((16, len(FEATURE_NAMES)), dtype=np.float32),
-        np.zeros(16, dtype=np.float32),
-        np.full((len(ACTION_NAMES), 16), np.finfo(np.float32).max, dtype=np.float32),
+        np.ones((64, len(FEATURE_NAMES)), dtype=np.float32),
+        np.zeros(64, dtype=np.float32),
+        np.ones((64, 64), dtype=np.float32),
+        np.zeros(64, dtype=np.float32),
+        np.full((len(ACTION_NAMES), 64), np.finfo(np.float32).max, dtype=np.float32),
         np.zeros(len(ACTION_NAMES), dtype=np.float32),
     )
     with pytest.raises(ValueError, match="float32 runtime range"):
         overflowing.logits([1.0] * len(FEATURE_NAMES))
+
+
+def test_tanh_policy_requires_exact_predictor_v3_actor_shape() -> None:
+    """Deployment rejects alternate actor widths rather than changing the policy contract."""
+    with pytest.raises(ValueError, match="first hidden weights"):
+        TanhMlpPolicy(
+            np.zeros((63, len(FEATURE_NAMES)), dtype=np.float32),
+            np.zeros(64, dtype=np.float32),
+            np.zeros((64, 64), dtype=np.float32),
+            np.zeros(64, dtype=np.float32),
+            np.zeros((len(ACTION_NAMES), 64), dtype=np.float32),
+            np.zeros(len(ACTION_NAMES), dtype=np.float32),
+        )
 
 
 def test_onnx_loader_rejects_incompatible_metadata(tmp_path: Path) -> None:

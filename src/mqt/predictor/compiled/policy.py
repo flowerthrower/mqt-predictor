@@ -26,12 +26,12 @@ if TYPE_CHECKING:
 
     from numpy.typing import NDArray
 
-OBSERVATION_SCHEMA = "mqt-predictor-core-stages/2"
+OBSERVATION_SCHEMA = "mqt-predictor-core-stages/3"
 NATIVE_POLICY_SCHEMA = "mqt-predictor-native-policy/1"
 COMPILER_TARGET_SCHEMA = "mqt-compiler-target/1"
-TARGET_FINGERPRINT_SCHEMA = b"mqt-compiler-target-fingerprint/1"
+TARGET_FINGERPRINT_SCHEMA = b"mqt-compiler-target-fingerprint/2"
 TARGET_FINGERPRINT_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
-MAX_PASSES = 20
+MAX_STEPS = 20
 
 V3_OPERATION_NAMES = (
     "u3",
@@ -132,15 +132,7 @@ V3_FEATURE_NAMES = (
     "z",
 )
 
-FEATURE_NAMES = (
-    *V3_FEATURE_NAMES,
-    "step_fraction",
-    "merge-single-qubit-rotation-gates_count",
-    "fuse-single-qubit-unitary-runs_count",
-    "fuse-two-qubit-gates_count",
-    "place-and-route_count",
-    "synthesize-for-target_count",
-)
+FEATURE_NAMES = V3_FEATURE_NAMES
 ACTION_NAMES = (
     "merge-single-qubit-rotation-gates",
     "fuse-single-qubit-unitary-runs",
@@ -252,7 +244,7 @@ def _normalized_target(
 
 
 def target_fingerprint(path: Path) -> str:
-    """Return the target fingerprint produced by the C++ v1 target loader."""
+    """Return the calibration-sensitive fingerprint produced by the C++ target loader."""
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -264,9 +256,11 @@ def target_fingerprint(path: Path) -> str:
     payload.append(0)
     payload.append(1)
     _append_string(payload, name)
+    payload.append(0)  # no duration unit in the JSON target schema
     _append_u64(payload, len(sites))
     for site in sites:
         _append_u64(payload, site)
+        payload.extend((0, 0, 0))  # no site name, T1, or T2
     payload.append(couplings is not None)
     if couplings is not None:
         _append_u64(payload, len(couplings))
@@ -279,6 +273,8 @@ def target_fingerprint(path: Path) -> str:
         _append_string(payload, operation_name)
         _append_u64(payload, num_qubits)
         _append_u64(payload, num_parameters)
+        payload.extend((0, 0))  # no default duration or fidelity
+        _append_u64(payload, 0)  # no calibrated site tuples
     return f"sha256:{hashlib.sha256(payload).hexdigest()}"
 
 

@@ -40,10 +40,14 @@ MAX_MODEL_BYTES = 1024 * 1024
 
 _WEIGHTS_NAME = "weights"
 _BIAS_NAME = "bias"
-_HIDDEN_WEIGHTS_NAME = "hidden_weights"
-_HIDDEN_BIAS_NAME = "hidden_bias"
+_FIRST_HIDDEN_WEIGHTS_NAME = "first_hidden_weights"
+_FIRST_HIDDEN_BIAS_NAME = "first_hidden_bias"
+_SECOND_HIDDEN_WEIGHTS_NAME = "second_hidden_weights"
+_SECOND_HIDDEN_BIAS_NAME = "second_hidden_bias"
 _OUTPUT_WEIGHTS_NAME = "output_weights"
 _OUTPUT_BIAS_NAME = "output_bias"
+_HIDDEN_SIZE = 64
+_TANH_MLP_ARCHITECTURE = "tanh-mlp-64x64"
 _METADATA_KEYS = frozenset({
     "schema",
     "observation_schema",
@@ -60,35 +64,54 @@ _METADATA_KEYS = frozenset({
 
 @dataclass(frozen=True)
 class TanhMlpPolicy:
-    """Parameters of a fixed one-hidden-layer actor exported to ONNX."""
+    """Parameters of the fixed two-layer Tanh actor used by Predictor v3."""
 
-    hidden_weights: NDArray[np.float32]
-    hidden_bias: NDArray[np.float32]
+    first_hidden_weights: NDArray[np.float32]
+    first_hidden_bias: NDArray[np.float32]
+    second_hidden_weights: NDArray[np.float32]
+    second_hidden_bias: NDArray[np.float32]
     output_weights: NDArray[np.float32]
     output_bias: NDArray[np.float32]
 
     def __post_init__(self) -> None:
         """Validate dimensions and immutable float32 parameter storage."""
-        hidden_weights = np.asarray(self.hidden_weights, dtype=np.float32)
-        hidden_bias = np.asarray(self.hidden_bias, dtype=np.float32)
+        first_hidden_weights = np.asarray(self.first_hidden_weights, dtype=np.float32)
+        first_hidden_bias = np.asarray(self.first_hidden_bias, dtype=np.float32)
+        second_hidden_weights = np.asarray(self.second_hidden_weights, dtype=np.float32)
+        second_hidden_bias = np.asarray(self.second_hidden_bias, dtype=np.float32)
         output_weights = np.asarray(self.output_weights, dtype=np.float32)
         output_bias = np.asarray(self.output_bias, dtype=np.float32)
-        if hidden_weights.ndim != 2 or hidden_weights.shape[1] != len(FEATURE_NAMES):
-            msg = f"hidden weights must have shape [hidden,{len(FEATURE_NAMES)}]"
+        if first_hidden_weights.shape != (_HIDDEN_SIZE, len(FEATURE_NAMES)):
+            msg = f"first hidden weights must have shape [{_HIDDEN_SIZE},{len(FEATURE_NAMES)}]"
             raise ValueError(msg)
-        hidden_size = hidden_weights.shape[0]
-        if not 0 < hidden_size <= 64 or hidden_bias.shape != (hidden_size,):
-            msg = "hidden actor width must be between 1 and 64"
+        if first_hidden_bias.shape != (_HIDDEN_SIZE,):
+            msg = f"first hidden bias must have shape [{_HIDDEN_SIZE}]"
             raise ValueError(msg)
-        if output_weights.shape != (len(ACTION_NAMES), hidden_size) or output_bias.shape != (len(ACTION_NAMES),):
+        if second_hidden_weights.shape != (_HIDDEN_SIZE, _HIDDEN_SIZE):
+            msg = f"second hidden weights must have shape [{_HIDDEN_SIZE},{_HIDDEN_SIZE}]"
+            raise ValueError(msg)
+        if second_hidden_bias.shape != (_HIDDEN_SIZE,):
+            msg = f"second hidden bias must have shape [{_HIDDEN_SIZE}]"
+            raise ValueError(msg)
+        if output_weights.shape != (len(ACTION_NAMES), _HIDDEN_SIZE) or output_bias.shape != (len(ACTION_NAMES),):
             msg = f"output parameters must produce {len(ACTION_NAMES)} action logits"
             raise ValueError(msg)
-        if not all(np.isfinite(value).all() for value in (hidden_weights, hidden_bias, output_weights, output_bias)):
+        parameters = (
+            first_hidden_weights,
+            first_hidden_bias,
+            second_hidden_weights,
+            second_hidden_bias,
+            output_weights,
+            output_bias,
+        )
+        if not all(np.isfinite(value).all() for value in parameters):
             msg = "actor parameters must be finite"
             raise ValueError(msg)
         for name, value in (
-            ("hidden_weights", hidden_weights),
-            ("hidden_bias", hidden_bias),
+            ("first_hidden_weights", first_hidden_weights),
+            ("first_hidden_bias", first_hidden_bias),
+            ("second_hidden_weights", second_hidden_weights),
+            ("second_hidden_bias", second_hidden_bias),
             ("output_weights", output_weights),
             ("output_bias", output_bias),
         ):
@@ -106,8 +129,9 @@ class TanhMlpPolicy:
             msg = "features must lie in [0, 1]"
             raise ValueError(msg)
         with np.errstate(over="ignore", invalid="ignore"):
-            hidden = np.tanh(self.hidden_weights @ feature_array + self.hidden_bias)
-            logits = np.asarray(self.output_weights @ hidden + self.output_bias, dtype=np.float32)
+            first_hidden = np.tanh(self.first_hidden_weights @ feature_array + self.first_hidden_bias)
+            second_hidden = np.tanh(self.second_hidden_weights @ first_hidden + self.second_hidden_bias)
+            logits = np.asarray(self.output_weights @ second_hidden + self.output_bias, dtype=np.float32)
         if not np.isfinite(logits).all():
             msg = "Tanh policy logits exceed the float32 runtime range"
             raise ValueError(msg)
@@ -245,41 +269,63 @@ def _validate_model(
         return
 
     expected_initializers = {
-        _HIDDEN_WEIGHTS_NAME,
-        _HIDDEN_BIAS_NAME,
+        _FIRST_HIDDEN_WEIGHTS_NAME,
+        _FIRST_HIDDEN_BIAS_NAME,
+        _SECOND_HIDDEN_WEIGHTS_NAME,
+        _SECOND_HIDDEN_BIAS_NAME,
         _OUTPUT_WEIGHTS_NAME,
         _OUTPUT_BIAS_NAME,
     }
-    if len(graph.node) != 3 or set(initializers) != expected_initializers:
-        msg = "ONNX policy must be a linear or one-hidden-layer Tanh actor"
+    if len(graph.node) != 5 or set(initializers) != expected_initializers:
+        msg = "ONNX policy must be a linear or two-hidden-layer Tanh actor"
         raise ValueError(msg)
-    hidden_gemm, activation, output_gemm = graph.node
+    first_hidden_gemm, first_activation, second_hidden_gemm, second_activation, output_gemm = graph.node
     if (
-        hidden_gemm.op_type != "Gemm"
-        or hidden_gemm.domain
-        or tuple(hidden_gemm.input) != (ONNX_INPUT_NAME, _HIDDEN_WEIGHTS_NAME, _HIDDEN_BIAS_NAME)
-        or tuple(hidden_gemm.output) != ("hidden_pre_activation",)
-        or attributes(hidden_gemm) != {"transB": 1}
-        or activation.op_type != "Tanh"
-        or activation.domain
-        or tuple(activation.input) != ("hidden_pre_activation",)
-        or tuple(activation.output) != ("hidden",)
-        or attributes(activation)
+        first_hidden_gemm.op_type != "Gemm"
+        or first_hidden_gemm.domain
+        or tuple(first_hidden_gemm.input) != (ONNX_INPUT_NAME, _FIRST_HIDDEN_WEIGHTS_NAME, _FIRST_HIDDEN_BIAS_NAME)
+        or tuple(first_hidden_gemm.output) != ("first_hidden_pre_activation",)
+        or attributes(first_hidden_gemm) != {"transB": 1}
+        or first_activation.op_type != "Tanh"
+        or first_activation.domain
+        or tuple(first_activation.input) != ("first_hidden_pre_activation",)
+        or tuple(first_activation.output) != ("first_hidden",)
+        or attributes(first_activation)
+        or second_hidden_gemm.op_type != "Gemm"
+        or second_hidden_gemm.domain
+        or tuple(second_hidden_gemm.input) != ("first_hidden", _SECOND_HIDDEN_WEIGHTS_NAME, _SECOND_HIDDEN_BIAS_NAME)
+        or tuple(second_hidden_gemm.output) != ("second_hidden_pre_activation",)
+        or attributes(second_hidden_gemm) != {"transB": 1}
+        or second_activation.op_type != "Tanh"
+        or second_activation.domain
+        or tuple(second_activation.input) != ("second_hidden_pre_activation",)
+        or tuple(second_activation.output) != ("second_hidden",)
+        or attributes(second_activation)
         or output_gemm.op_type != "Gemm"
         or output_gemm.domain
-        or tuple(output_gemm.input) != ("hidden", _OUTPUT_WEIGHTS_NAME, _OUTPUT_BIAS_NAME)
+        or tuple(output_gemm.input) != ("second_hidden", _OUTPUT_WEIGHTS_NAME, _OUTPUT_BIAS_NAME)
         or tuple(output_gemm.output) != (ONNX_OUTPUT_NAME,)
         or attributes(output_gemm) != {"transB": 1}
     ):
         msg = "ONNX Tanh policy graph does not match the supported actor"
         raise ValueError(msg)
-    policy = TanhMlpPolicy(
-        hidden_weights=np.asarray(onnx.numpy_helper.to_array(initializers[_HIDDEN_WEIGHTS_NAME]), dtype=np.float32),
-        hidden_bias=np.asarray(onnx.numpy_helper.to_array(initializers[_HIDDEN_BIAS_NAME]), dtype=np.float32),
+    TanhMlpPolicy(
+        first_hidden_weights=np.asarray(
+            onnx.numpy_helper.to_array(initializers[_FIRST_HIDDEN_WEIGHTS_NAME]), dtype=np.float32
+        ),
+        first_hidden_bias=np.asarray(
+            onnx.numpy_helper.to_array(initializers[_FIRST_HIDDEN_BIAS_NAME]), dtype=np.float32
+        ),
+        second_hidden_weights=np.asarray(
+            onnx.numpy_helper.to_array(initializers[_SECOND_HIDDEN_WEIGHTS_NAME]), dtype=np.float32
+        ),
+        second_hidden_bias=np.asarray(
+            onnx.numpy_helper.to_array(initializers[_SECOND_HIDDEN_BIAS_NAME]), dtype=np.float32
+        ),
         output_weights=np.asarray(onnx.numpy_helper.to_array(initializers[_OUTPUT_WEIGHTS_NAME]), dtype=np.float32),
         output_bias=np.asarray(onnx.numpy_helper.to_array(initializers[_OUTPUT_BIAS_NAME]), dtype=np.float32),
     )
-    if metadata["architecture"] != f"tanh-mlp-{policy.hidden_weights.shape[0]}":
+    if metadata["architecture"] != _TANH_MLP_ARCHITECTURE:
         msg = "ONNX policy architecture metadata does not match its graph"
         raise ValueError(msg)
 
@@ -295,7 +341,7 @@ def export_onnx_policy(
     training_algorithm: str,
     objective: str,
 ) -> None:
-    """Export a strict linear or one-hidden-layer ONNX actor.
+    """Export a strict linear or Predictor-v3-shaped ONNX actor.
 
     The optional :mod:`onnx` package is imported only when this function is
     called.
@@ -306,7 +352,7 @@ def export_onnx_policy(
     compiler_target_fingerprint = (
         target_fingerprint(target) if target is not None else cast("str", target_fingerprint_override)
     )
-    architecture = "linear" if isinstance(policy, LinearPolicy) else f"tanh-mlp-{policy.hidden_weights.shape[0]}"
+    architecture = "linear" if isinstance(policy, LinearPolicy) else _TANH_MLP_ARCHITECTURE
     metadata = _metadata(
         compiler_target_fingerprint=compiler_target_fingerprint,
         core_revision=core_revision,
@@ -336,23 +382,35 @@ def export_onnx_policy(
         graph_name = "mqt_predictor_linear_actor"
     else:
         initializers = [
-            onnx.numpy_helper.from_array(policy.hidden_weights, name=_HIDDEN_WEIGHTS_NAME),
-            onnx.numpy_helper.from_array(policy.hidden_bias, name=_HIDDEN_BIAS_NAME),
+            onnx.numpy_helper.from_array(policy.first_hidden_weights, name=_FIRST_HIDDEN_WEIGHTS_NAME),
+            onnx.numpy_helper.from_array(policy.first_hidden_bias, name=_FIRST_HIDDEN_BIAS_NAME),
+            onnx.numpy_helper.from_array(policy.second_hidden_weights, name=_SECOND_HIDDEN_WEIGHTS_NAME),
+            onnx.numpy_helper.from_array(policy.second_hidden_bias, name=_SECOND_HIDDEN_BIAS_NAME),
             onnx.numpy_helper.from_array(policy.output_weights, name=_OUTPUT_WEIGHTS_NAME),
             onnx.numpy_helper.from_array(policy.output_bias, name=_OUTPUT_BIAS_NAME),
         ]
         nodes = [
             onnx.helper.make_node(
                 "Gemm",
-                [ONNX_INPUT_NAME, _HIDDEN_WEIGHTS_NAME, _HIDDEN_BIAS_NAME],
-                ["hidden_pre_activation"],
-                name="hidden_linear",
+                [ONNX_INPUT_NAME, _FIRST_HIDDEN_WEIGHTS_NAME, _FIRST_HIDDEN_BIAS_NAME],
+                ["first_hidden_pre_activation"],
+                name="first_hidden_linear",
                 transB=1,
             ),
-            onnx.helper.make_node("Tanh", ["hidden_pre_activation"], ["hidden"], name="hidden_tanh"),
+            onnx.helper.make_node("Tanh", ["first_hidden_pre_activation"], ["first_hidden"], name="first_hidden_tanh"),
             onnx.helper.make_node(
                 "Gemm",
-                ["hidden", _OUTPUT_WEIGHTS_NAME, _OUTPUT_BIAS_NAME],
+                ["first_hidden", _SECOND_HIDDEN_WEIGHTS_NAME, _SECOND_HIDDEN_BIAS_NAME],
+                ["second_hidden_pre_activation"],
+                name="second_hidden_linear",
+                transB=1,
+            ),
+            onnx.helper.make_node(
+                "Tanh", ["second_hidden_pre_activation"], ["second_hidden"], name="second_hidden_tanh"
+            ),
+            onnx.helper.make_node(
+                "Gemm",
+                ["second_hidden", _OUTPUT_WEIGHTS_NAME, _OUTPUT_BIAS_NAME],
                 [ONNX_OUTPUT_NAME],
                 name="action_logits",
                 transB=1,

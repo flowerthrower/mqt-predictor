@@ -11,15 +11,20 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
 import pytest
+from gymnasium.spaces import Dict as DictSpace
 from gymnasium.spaces import Discrete
 from mqt.bench import BenchmarkLevel, get_benchmark
 from qiskit import QuantumCircuit, qasm3
+from qiskit.circuit import Measure
+from qiskit.circuit.library import CXGate, CZGate, HGate
+from qiskit.transpiler import InstructionProperties, Target
 
 from mqt.predictor.compiled import ACTION_NAMES, FEATURE_NAMES, CorePredictorEnv, core_env
 
@@ -27,6 +32,12 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 INPUTS = Path(__file__).parents[2] / "cpp/test/Inputs"
+
+
+class _TargetLike(Protocol):
+    """Compiler-target surface consumed by the environment."""
+
+    num_qubits: int
 
 
 @dataclass(frozen=True)
@@ -69,6 +80,8 @@ class _FakeQCOProgram(_FakeQCProgram):
 
     def _apply(self, name: str) -> None:
         self.compiler.applied.append((name, self.ir))
+        if name in self.compiler.action_delays:
+            time.sleep(self.compiler.action_delays[name])
         if name in self.compiler.failing_actions:
             self.ir += f"|partial-{name}"
             msg = f"failed {name}"
@@ -151,6 +164,7 @@ class _FakeCompiler:
         self.failing_actions: set[str] = set()
         self.failing_stages: set[str] = set()
         self.failing_export_markers: set[str] = set()
+        self.action_delays: dict[str, float] = {}
         self.fail_compilation = False
 
 
@@ -172,8 +186,46 @@ def compiler(monkeypatch: pytest.MonkeyPatch) -> _FakeCompiler:
     return fake
 
 
-def _environment(circuits: Sequence[QuantumCircuit], *, max_passes: int = 20) -> CorePredictorEnv:
-    return CorePredictorEnv(circuits, _FakeTarget(), max_passes=max_passes)
+def _reward_target(*, num_qubits: int = 4) -> Target:
+    target = Target(num_qubits=num_qubits)
+    target.add_instruction(
+        HGate(),
+        {(qubit,): InstructionProperties(error=0.01) for qubit in range(num_qubits)},
+    )
+    target.add_instruction(
+        CXGate(),
+        {
+            (control, target_qubit): InstructionProperties(error=0.02)
+            for control in range(num_qubits)
+            for target_qubit in range(num_qubits)
+            if control != target_qubit
+        },
+    )
+    target.add_instruction(
+        Measure(),
+        {(qubit,): InstructionProperties(error=0.03) for qubit in range(num_qubits)},
+    )
+    return target
+
+
+def _environment(
+    circuits: Sequence[QuantumCircuit],
+    *,
+    max_steps: int = 20,
+    pass_timeout: float | None = None,
+    reward_target: Target | None = None,
+) -> CorePredictorEnv:
+    return CorePredictorEnv(
+        circuits,
+        _FakeTarget(),
+        _reward_target() if reward_target is None else reward_target,
+        max_steps=max_steps,
+        pass_timeout=pass_timeout,
+    )
+
+
+def _feature(observation: dict[str, np.ndarray], name: str) -> float:
+    return float(observation[name][0])
 
 
 def test_core_environment_has_compact_stable_abi(bell: QuantumCircuit, compiler: _FakeCompiler) -> None:
@@ -241,25 +293,21 @@ def test_core_environment_has_compact_stable_abi(bell: QuantumCircuit, compiler:
         "x",
         "y",
         "z",
-        "step_fraction",
-        "merge-single-qubit-rotation-gates_count",
-        "fuse-single-qubit-unitary-runs_count",
-        "fuse-two-qubit-gates_count",
-        "place-and-route_count",
-        "synthesize-for-target_count",
     )
     assert isinstance(env.action_space, Discrete)
     assert env.action_space.n == len(ACTION_NAMES)
+    assert isinstance(env.observation_space, DictSpace)
+    assert tuple(env.observation_space.spaces) == FEATURE_NAMES
     assert env.observation_space.contains(observation)
-    assert observation.dtype == np.float32
-    assert observation[FEATURE_NAMES.index("h")] == pytest.approx(0.25)
-    assert observation[FEATURE_NAMES.index("cx")] == pytest.approx(0.25)
-    assert observation[FEATURE_NAMES.index("measure")] == pytest.approx(0.5)
-    assert observation[FEATURE_NAMES.index("num_qubits")] == pytest.approx(0.5)
-    assert observation[FEATURE_NAMES.index("depth")] == pytest.approx(math.log1p(3) / math.log1p(999_999))
+    assert tuple(observation) == FEATURE_NAMES
+    assert all(value.dtype == np.float32 and value.shape == (1,) for value in observation.values())
+    assert _feature(observation, "h") == pytest.approx(0.25)
+    assert _feature(observation, "cx") == pytest.approx(0.25)
+    assert _feature(observation, "measure") == pytest.approx(0.5)
+    assert _feature(observation, "num_qubits") == pytest.approx(0.5)
+    assert _feature(observation, "depth") == pytest.approx(math.log1p(3) / math.log1p(999_999))
     assert env.action_masks() == [True, True, True, True, True, False]
     assert info["circuit_index"] == 0
-    assert info["potential"] == pytest.approx(0.0)
     assert (info["mapped"], info["routed"], info["synthesized"]) == (False, False, False)
     assert compiler.imports == 1
     assert compiler.cleanups == 1
@@ -272,9 +320,9 @@ def test_actions_keep_one_persistent_qco_state(bell: QuantumCircuit, compiler: _
     env.reset(options={"circuit_index": 0})
 
     first_before = env.program.ir
-    first_observation, _, _, _, first_info = env.step(0)
+    first_observation, first_reward, _, _, first_info = env.step(0)
     second_before = env.program.ir
-    second_observation, _, _, _, _ = env.step(1)
+    second_observation, second_reward, _, _, _ = env.step(1)
 
     assert compiler.imports == 1
     assert compiler.applied == [
@@ -283,12 +331,10 @@ def test_actions_keep_one_persistent_qco_state(bell: QuantumCircuit, compiler: _
     ]
     assert compiler.fuse_bases == ["u"]
     assert first_info["changed"]
-    assert first_info["potential"] == pytest.approx(0.0)
     assert not first_info["mapped"]
-    assert first_observation[FEATURE_NAMES.index("step_fraction")] == pytest.approx(0.05)
-    assert first_observation[FEATURE_NAMES.index(f"{ACTION_NAMES[0]}_count")] == pytest.approx(0.05)
-    assert second_observation[FEATURE_NAMES.index("step_fraction")] == pytest.approx(0.1)
-    assert second_observation[FEATURE_NAMES.index(f"{ACTION_NAMES[1]}_count")] == pytest.approx(0.05)
+    assert first_reward == pytest.approx(0.0)
+    assert second_reward == pytest.approx(0.0)
+    assert all(np.array_equal(first_observation[name], second_observation[name]) for name in FEATURE_NAMES)
 
 
 def test_gate_frequencies_keep_unknown_operations_in_denominator(compiler: _FakeCompiler) -> None:
@@ -303,8 +349,8 @@ def test_gate_frequencies_keep_unknown_operations_in_denominator(compiler: _Fake
     observation, _ = env.reset(options={"circuit_index": 0})
 
     assert compiler.imports == 1
-    assert observation[FEATURE_NAMES.index("x")] == pytest.approx(1 / 3)
-    assert observation[FEATURE_NAMES.index("measure")] == pytest.approx(1 / 3)
+    assert _feature(observation, "x") == pytest.approx(1 / 3)
+    assert _feature(observation, "measure") == pytest.approx(1 / 3)
 
 
 @pytest.mark.parametrize("action", range(3))
@@ -340,28 +386,24 @@ def test_each_core_stage_calls_its_bound_method(
     assert any(stage == marker for stage, _ in compiler.stage_calls)
 
 
-def test_noop_suppression_still_permits_repeated_passes_after_change(
+def test_repeated_noop_passes_remain_legal(
     bell: QuantumCircuit,
     compiler: _FakeCompiler,
 ) -> None:
-    """Only an exact action retry on identical IR is masked."""
+    """The v3 policy may select the same ineffective pass repeatedly."""
     compiler.noop_actions.add(ACTION_NAMES[0])
     env = _environment([bell])
     env.reset()
-    stage_calls = len(compiler.stage_calls)
 
-    _, _, _, _, info = env.step(0)
+    _, first_reward, _, _, first_info = env.step(0)
+    _, second_reward, _, _, second_info = env.step(0)
 
-    assert not info["changed"]
-    assert len(compiler.stage_calls) == stage_calls
-    assert not env.action_masks()[0]
-    with pytest.raises(ValueError, match="not legal"):
-        env.step(0)
-
-    env.step(1)
+    assert not first_info["changed"]
+    assert not second_info["changed"]
+    assert first_reward == pytest.approx(0.0)
+    assert second_reward == pytest.approx(0.0)
     assert env.action_masks()[0]
-    env.step(0)
-    assert env.used_actions == [ACTION_NAMES[0], ACTION_NAMES[1], ACTION_NAMES[0]]
+    assert env.used_actions == [ACTION_NAMES[0], ACTION_NAMES[0]]
 
 
 @pytest.mark.usefixtures("compiler")
@@ -385,53 +427,21 @@ def test_phase_masks_require_explicit_mapping_synthesis_and_termination(
     assert env.action_masks() == [True, True, True, False, True, False]
 
 
-def test_required_stage_reopens_after_optimizer_retries_are_suppressed(
+@pytest.mark.usefixtures("compiler")
+def test_only_termination_returns_absolute_expected_fidelity(
     bell: QuantumCircuit,
-    compiler: _FakeCompiler,
 ) -> None:
-    """Exact-IR optimizer suppression must not leave a nonconformant dead end."""
-    compiler.noop_actions.update(ACTION_NAMES[:3])
-    compiler.noop_stages.update(ACTION_NAMES[3:5])
+    """Core actions return zero; terminate returns the configured device fidelity."""
     env = _environment([bell])
     env.reset()
 
-    env.step(0)
-    env.step(1)
-    env.step(2)
-    env.step(4)
-    env.step(3)
-
-    assert env.action_masks() == [False, False, False, False, True, False]
-    env.step(4)
-    assert env.action_masks() == [False, False, False, False, False, True]
-
-
-@pytest.mark.usefixtures("compiler")
-def test_shaped_reward_is_potential_delta_and_terminal_reward_is_absolute(
-    bell: QuantumCircuit,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Intermediate rewards telescope while terminate reports final quality."""
-
-    def metrics(circuit: QuantumCircuit) -> core_env.CompileMetrics:
-        ir = str(circuit.metadata["fake_ir"])
-        gates = 8 if ACTION_NAMES[0] in ir else 10
-        return core_env.CompileMetrics(two_qubit_depth=10, two_qubit=10, depth=10, gates=gates)
-
-    monkeypatch.setattr(core_env, "_circuit_metrics", metrics)
-    env = _environment([bell])
-    _, reset_info = env.reset()
-
-    _, reward, _, _, info = env.step(0)
-
-    assert reset_info["potential"] == pytest.approx(0.0)
-    assert info["potential"] == pytest.approx(0.01)
-    assert reward == pytest.approx(0.009)
+    _, optimizer_reward, _, _, _ = env.step(0)
+    assert optimizer_reward == pytest.approx(0.0)
 
     env.step(3)
     env.step(4)
     _, terminal_reward, terminated, truncated, _ = env.step(5)
-    assert terminal_reward == pytest.approx(0.01)
+    assert terminal_reward == pytest.approx(0.99 * 0.98 * 0.97**2)
     assert terminated
     assert not truncated
 
@@ -446,31 +456,11 @@ def test_transform_failure_does_not_commit_partial_program(bell: QuantumCircuit,
     _, reward, terminated, truncated, info = env.step(2)
 
     assert env.program.ir == original
-    assert env.num_passes == 0
-    assert reward == pytest.approx(-2.0)
+    assert env.num_steps == 0
+    assert reward == pytest.approx(0.0)
     assert not terminated
     assert truncated
-    assert "failed fuse-two-qubit-gates" in str(info["error"])
-
-
-def test_potential_completion_failure_does_not_commit_stage(
-    bell: QuantumCircuit,
-    compiler: _FakeCompiler,
-) -> None:
-    """Reward evaluation remains in the same transaction as the selected stage."""
-    env = _environment([bell])
-    env.reset()
-    original = env.program.ir
-    compiler.failing_stages.add(ACTION_NAMES[4])
-
-    _, reward, terminated, truncated, info = env.step(3)
-
-    assert env.program.ir == original
-    assert env.num_passes == 0
-    assert reward == pytest.approx(-2.0)
-    assert not terminated
-    assert truncated
-    assert "failed synthesize-for-target" in str(info["error"])
+    assert "failed fuse-two-qubit-gates" in str(info["Truncated because of error"])
 
 
 def test_terminal_failure_does_not_commit_partial_program(bell: QuantumCircuit, compiler: _FakeCompiler) -> None:
@@ -485,7 +475,7 @@ def test_terminal_failure_does_not_commit_partial_program(bell: QuantumCircuit, 
     _, reward, terminated, truncated, _ = env.step(5)
 
     assert env.program.ir == original
-    assert reward == pytest.approx(-2.0)
+    assert reward == pytest.approx(0.0)
     assert not terminated
     assert truncated
 
@@ -508,11 +498,11 @@ def test_export_failure_does_not_commit_candidate(
     _, reward, terminated, truncated, info = env.step(action)
 
     assert env.program.ir == original
-    assert env.num_passes == (0 if action == 0 else 2)
-    assert reward == pytest.approx(-2.0)
+    assert env.num_steps == (0 if action == 0 else 2)
+    assert reward == pytest.approx(0.0)
     assert not terminated
     assert truncated
-    assert "failed export" in str(info["error"])
+    assert "failed export" in str(info["Truncated because of error"])
 
 
 def test_termination_only_verifies_compiled_state(bell: QuantumCircuit, compiler: _FakeCompiler) -> None:
@@ -529,65 +519,58 @@ def test_termination_only_verifies_compiled_state(bell: QuantumCircuit, compiler
     assert compiler.compilations == baseline_compilations
     assert env.program.ir == before
     assert env.observation_space.contains(observation)
-    assert reward == pytest.approx(0.0)
+    assert reward == pytest.approx(0.99 * 0.98 * 0.97**2)
     assert terminated
     assert not truncated
-    assert info["passes"] == 2
+    assert info["steps"] == 3
+    assert env.num_steps == 3
     assert compiler.exports[-1] is env.target
 
 
 @pytest.mark.usefixtures("compiler")
-def test_exact_pass_cap_truncates_nonconformant_state(
+def test_exact_step_cap_truncates_with_zero_reward(
     bell: QuantumCircuit,
 ) -> None:
-    """Exhausting the pass budget without conformance ends the episode."""
-    env = _environment([bell], max_passes=1)
+    """Every nonterminal action consumes a horizon slot regardless of state."""
+    env = _environment([bell], max_steps=1)
     env.reset()
 
-    _, reward, terminated, truncated, _ = env.step(0)
+    _, reward, terminated, truncated, info = env.step(0)
 
-    assert env.num_passes == 1
-    assert reward == pytest.approx(-2.001)
+    assert env.num_steps == 1
+    assert reward == pytest.approx(0.0)
     assert not terminated
     assert truncated
-    assert env.action_masks() == [False] * 6
+    assert info["truncation_reason"] == "max_steps_exceeded"
+    with pytest.raises(RuntimeError, match="episode has ended"):
+        env.step(0)
 
 
 @pytest.mark.usefixtures("compiler")
-def test_exact_pass_cap_allows_conformant_termination(
+def test_horizon_counts_termination_and_does_not_reserve_stage_slots(
     bell: QuantumCircuit,
 ) -> None:
-    """The final pass slots are reserved for target completion."""
-    env = _environment([bell], max_passes=2)
+    """Terminate must fit in the horizon; masks remain phase-only."""
+    env = _environment([bell], max_steps=2)
     env.reset()
 
-    assert env.action_masks() == [False, False, False, True, False, False]
+    assert env.action_masks() == [True, True, True, True, True, False]
     env.step(3)
-    assert env.action_masks() == [False, False, False, False, True, False]
+    assert env.action_masks() == [True, True, True, False, True, False]
     _, reward, terminated, truncated, _ = env.step(4)
 
-    assert reward == pytest.approx(-0.001)
+    assert reward == pytest.approx(0.0)
     assert not terminated
-    assert not truncated
-    assert env.action_masks() == [False, False, False, False, False, True]
+    assert truncated
+
+    env = _environment([bell], max_steps=3)
+    env.reset()
+    env.step(3)
+    env.step(4)
     _, _, terminated, truncated, info = env.step(5)
     assert terminated
     assert not truncated
-    assert info["passes"] == 2
-
-
-def test_baseline_is_cached_per_circuit(bell: QuantumCircuit, compiler: _FakeCompiler) -> None:
-    """Repeated resets do not recompile an unchanged canonical baseline."""
-    other = bell.copy()
-    other.x(0)
-    env = _environment([bell, other])
-
-    env.reset(options={"circuit_index": 0})
-    env.reset(options={"circuit_index": 0})
-    assert compiler.compilations == 1
-
-    env.reset(options={"circuit_index": 1})
-    assert compiler.compilations == 2
+    assert info["steps"] == 3
 
 
 def test_reset_rejects_circuit_larger_than_target(bell: QuantumCircuit, compiler: _FakeCompiler) -> None:
@@ -602,10 +585,85 @@ def test_reset_rejects_circuit_larger_than_target(bell: QuantumCircuit, compiler
     assert compiler.imports == 0
 
 
-def test_environment_rejects_more_than_twenty_passes(bell: QuantumCircuit) -> None:
-    """History normalization has a fixed 20-pass ABI."""
+def test_environment_rejects_more_than_twenty_steps(bell: QuantumCircuit) -> None:
+    """The deployment contract has an exact 20-action horizon."""
     with pytest.raises(ValueError, match="between 1 and 20"):
-        _environment([bell], max_passes=21)
+        _environment([bell], max_steps=21)
+
+
+def test_environment_requires_matching_core_and_reward_targets(bell: QuantumCircuit) -> None:
+    """Training cannot silently combine calibrations from another device width."""
+    with pytest.raises(ValueError, match="same number of qubits"):
+        CorePredictorEnv([bell], _FakeTarget(), Target(num_qubits=3))
+
+
+def test_reverse_cz_uses_the_same_symmetric_calibration(
+    compiler: _FakeCompiler,
+) -> None:
+    """Core operand reversal remains scoreable without general edge mirroring."""
+    circuit = QuantumCircuit(2)
+    circuit.cz(1, 0)
+    reward_target = Target(num_qubits=4)
+    reward_target.add_instruction(CZGate(), {(0, 1): InstructionProperties(error=0.2)})
+    env = _environment([circuit], reward_target=reward_target, max_steps=3)
+    env.reset()
+    env.step(3)
+    env.step(4)
+
+    _, reward, terminated, truncated, _ = env.step(5)
+
+    assert reward == pytest.approx(0.8)
+    assert terminated
+    assert not truncated
+    assert (1, 0) not in reward_target["cz"]
+    assert env.reward_target["cz"][1, 0] is env.reward_target["cz"][0, 1]
+    assert compiler.imports == 1
+
+
+def test_reward_target_does_not_mirror_directional_gates() -> None:
+    """Only CZ receives the narrow swap-invariant calibration completion."""
+    reward_target = Target(num_qubits=2)
+    reward_target.add_instruction(CXGate(), {(0, 1): InstructionProperties(error=0.2)})
+
+    prepared = core_env._prepare_reward_target(reward_target)  # ruff: ignore[private-member-access]
+
+    assert (1, 0) not in prepared["cx"]
+
+
+def test_pass_timeout_truncates_without_committing_partial_state(
+    bell: QuantumCircuit,
+    compiler: _FakeCompiler,
+) -> None:
+    """The Predictor v3 signal timeout is transactional for interruptible passes."""
+    required = ("SIGALRM", "ITIMER_REAL", "getitimer", "setitimer")
+    if not all(hasattr(core_env.signal, attribute) for attribute in required):
+        pytest.skip("POSIX interval timers are unavailable")
+    compiler.action_delays[ACTION_NAMES[0]] = 0.1
+    env = _environment([bell], pass_timeout=0.01)
+    env.reset()
+    original = env.program.ir
+
+    _, reward, terminated, truncated, info = env.step(0)
+
+    assert env.program.ir == original
+    assert env.num_steps == 0
+    assert reward == pytest.approx(0.0)
+    assert not terminated
+    assert truncated
+    assert "TimeoutError" in str(info["Truncated because of error"])
+
+
+def test_pass_timeout_must_be_positive(bell: QuantumCircuit) -> None:
+    """Invalid timeout values fail during environment construction."""
+    with pytest.raises(ValueError, match="pass_timeout must be positive"):
+        _environment([bell], pass_timeout=0.0)
+
+
+def _iqm_targets() -> tuple[_TargetLike, Target]:
+    compiler = pytest.importorskip("mqt.core.mlir")
+    qiskit_plugin = pytest.importorskip("mqt.core.plugins.qiskit")
+    backend = qiskit_plugin.QDMIBackend.from_device_id("mqt.sc.iqm.garnet")
+    return compiler.CompilerTarget.from_device(backend.device), backend.target
 
 
 def test_current_core_compiles_bell_for_iqm_garnet(
@@ -614,37 +672,39 @@ def test_current_core_compiles_bell_for_iqm_garnet(
 ) -> None:
     """The optional current-Core dependency supports the complete environment boundary."""
     monkeypatch.chdir(tmp_path)
-    compiler = pytest.importorskip("mqt.core.mlir")
-    target = compiler.CompilerTarget.from_device_id("mqt.sc.iqm.garnet")
-    env = CorePredictorEnv([qasm3.load(INPUTS / "bell.qasm")], target, max_passes=2)
+    pytest.importorskip("mqt.core.mlir")
+    target, reward_target = _iqm_targets()
+    env = CorePredictorEnv([qasm3.load(INPUTS / "bell.qasm")], target, reward_target, max_steps=3)
 
     observation, _ = env.reset(options={"circuit_index": 0})
     assert env.observation_space.contains(observation)
-    expected = np.zeros(len(FEATURE_NAMES), dtype=np.float32)
-    expected[FEATURE_NAMES.index("critical_depth")] = 1.0
-    expected[FEATURE_NAMES.index("cx")] = 3 / 8
-    expected[FEATURE_NAMES.index("depth")] = math.log1p(6) / math.log1p(999_999)
-    expected[FEATURE_NAMES.index("entanglement_ratio")] = 0.6
-    expected[FEATURE_NAMES.index("h")] = 1 / 8
-    expected[FEATURE_NAMES.index("liveness")] = 0.6111111
-    expected[FEATURE_NAMES.index("measure")] = 3 / 8
-    expected[FEATURE_NAMES.index("num_qubits")] = 0.15
-    expected[FEATURE_NAMES.index("program_communication")] = 1.0
-    expected[FEATURE_NAMES.index("rz")] = 1 / 8
-    np.testing.assert_allclose(observation, expected, rtol=1e-6, atol=1e-6)
+    expected = dict.fromkeys(FEATURE_NAMES, 0.0)
+    expected["critical_depth"] = 1.0
+    expected["cx"] = 3 / 8
+    expected["depth"] = math.log1p(6) / math.log1p(999_999)
+    expected["entanglement_ratio"] = 0.6
+    expected["h"] = 1 / 8
+    expected["liveness"] = 0.6111111
+    expected["measure"] = 3 / 8
+    expected["num_qubits"] = 0.15
+    expected["program_communication"] = 1.0
+    expected["rz"] = 1 / 8
+    for name, value in expected.items():
+        assert _feature(observation, name) == pytest.approx(value, rel=1e-6, abs=1e-6)
 
     mapped_observation, _, _, _, _ = env.step(3)
     mapped_qiskit = env.program.copy().to_qc().to_qiskit(target=target)
     assert mapped_qiskit.num_qubits == target.num_qubits
-    assert mapped_observation[FEATURE_NAMES.index("num_qubits")] == pytest.approx(0.15)
+    assert _feature(mapped_observation, "num_qubits") == pytest.approx(0.15)
 
     env.step(4)
-    observation, _, terminated, truncated, info = env.step(5)
+    observation, reward, terminated, truncated, info = env.step(5)
 
     assert env.observation_space.contains(observation)
+    assert reward == pytest.approx(0.851076634)
     assert terminated
     assert not truncated
-    assert info["passes"] == 2
+    assert info["steps"] == 3
 
 
 def test_current_core_staged_api_matches_canonical_pipeline(
@@ -704,9 +764,9 @@ def test_current_core_fusion_keeps_bell_observable(
 ) -> None:
     """The shared ``u`` fusion basis remains exportable for the next observation."""
     monkeypatch.chdir(tmp_path)
-    compiler = pytest.importorskip("mqt.core.mlir")
-    target = compiler.CompilerTarget.from_device_id("mqt.sc.iqm.garnet")
-    env = CorePredictorEnv([bell], target, max_passes=3)
+    pytest.importorskip("mqt.core.mlir")
+    target, reward_target = _iqm_targets()
+    env = CorePredictorEnv([bell], target, reward_target, max_steps=3)
     env.reset(options={"circuit_index": 0})
 
     observation, reward, terminated, truncated, _ = env.step(1)
@@ -723,9 +783,9 @@ def test_current_core_decomposes_wide_gates_during_reset(
 ) -> None:
     """Reset makes the optimization actions safe by decomposing wide controls."""
     monkeypatch.chdir(tmp_path)
-    compiler = pytest.importorskip("mqt.core.mlir")
-    target = compiler.CompilerTarget.from_device_id("mqt.sc.iqm.garnet")
-    env = CorePredictorEnv([qasm3.load(INPUTS / "wide.qasm")], target, max_passes=3)
+    pytest.importorskip("mqt.core.mlir")
+    target, reward_target = _iqm_targets()
+    env = CorePredictorEnv([qasm3.load(INPUTS / "wide.qasm")], target, reward_target, max_steps=3)
     env.reset(options={"circuit_index": 0})
 
     assert env.action_masks() == [True, True, True, True, True, False]
@@ -743,13 +803,13 @@ def test_current_core_native_input_uses_action_derived_stages(
 ) -> None:
     """Training and compiled inference share conservative phase transitions."""
     monkeypatch.chdir(tmp_path)
-    compiler = pytest.importorskip("mqt.core.mlir")
-    target = compiler.CompilerTarget.from_device_id("mqt.sc.iqm.garnet")
+    pytest.importorskip("mqt.core.mlir")
+    target, reward_target = _iqm_targets()
     circuit = QuantumCircuit(2, 2)
     circuit.r(0.5, 0.2, 0)
     circuit.cz(0, 1)
     circuit.measure([0, 1], [0, 1])
-    env = CorePredictorEnv([circuit], target, max_passes=3)
+    env = CorePredictorEnv([circuit], target, reward_target, max_steps=3)
 
     env.reset(options={"circuit_index": 0})
     assert env.action_masks() == [True, True, True, True, True, False]
@@ -757,7 +817,6 @@ def test_current_core_native_input_uses_action_derived_stages(
     _, _, _, _, info = env.step(3)
     assert info == {
         "changed": True,
-        "potential": pytest.approx(0.0),
         "mapped": True,
         "routed": True,
         "synthesized": False,
@@ -771,11 +830,11 @@ def test_current_core_qft_uses_compiled_critical_path_semantics(
 ) -> None:
     """The Python observation matches C++ tie-breaking on QFT critical paths."""
     monkeypatch.chdir(tmp_path)
-    compiler = pytest.importorskip("mqt.core.mlir")
-    target = compiler.CompilerTarget.from_device_id("mqt.sc.iqm.garnet")
+    pytest.importorskip("mqt.core.mlir")
+    target, reward_target = _iqm_targets()
     circuit = get_benchmark("qft", BenchmarkLevel.ALG, 4)
-    env = CorePredictorEnv([circuit], target, max_passes=1)
+    env = CorePredictorEnv([circuit], target, reward_target, max_steps=1)
 
     observation, _ = env.reset(options={"circuit_index": 0})
 
-    assert observation[FEATURE_NAMES.index("critical_depth")] == pytest.approx(0.5)
+    assert _feature(observation, "critical_depth") == pytest.approx(0.5)

@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace mqt::predictor::compiler {
@@ -29,8 +30,8 @@ struct PredictorOptions {
   std::string deviceId;
   std::string modelPath;
   bool trace = false;
-  bool samplePolicy = false;
-  std::uint64_t samplingSeed = 0;
+  bool deterministicPolicy = false;
+  std::optional<std::uint64_t> samplingSeed;
 };
 
 [[nodiscard]] std::unique_ptr<::mlir::Pass>

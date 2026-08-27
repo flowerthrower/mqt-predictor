@@ -19,9 +19,8 @@
 namespace mqt::predictor::compiler {
 
 inline constexpr std::string_view EXPERIMENT_SCHEMA =
-    "mqt-predictor-core-stages/2";
-inline constexpr std::size_t NUM_V3_FEATURES = 50;
-inline constexpr std::size_t NUM_FEATURES = 56;
+    "mqt-predictor-core-stages/3";
+inline constexpr std::size_t NUM_FEATURES = 50;
 inline constexpr std::array<std::string_view, NUM_FEATURES> FEATURE_NAMES{
     "c3sqrtx",
     "c3x",
@@ -72,18 +71,9 @@ inline constexpr std::array<std::string_view, NUM_FEATURES> FEATURE_NAMES{
     "u3",
     "x",
     "y",
-    "z",
-    "step_fraction",
-    "merge-single-qubit-rotation-gates_count",
-    "fuse-single-qubit-unitary-runs_count",
-    "fuse-two-qubit-gates_count",
-    "place-and-route_count",
-    "synthesize-for-target_count"};
-inline constexpr std::size_t STEP_FRACTION_INDEX = NUM_V3_FEATURES;
-inline constexpr std::size_t ACTION_COUNT_FEATURE_OFFSET =
-    STEP_FRACTION_INDEX + 1;
+    "z"};
 inline constexpr double DEPTH_NORMALIZATION_MAX = 999'999.0;
-inline constexpr std::size_t MAX_TRANSFORM_PASSES = 20;
+inline constexpr std::size_t MAX_STEPS = 20;
 
 using FeatureVector = std::array<float, NUM_FEATURES>;
 
@@ -133,8 +123,7 @@ struct Decision {
  * only run before mapping, target synthesis can only run while non-native
  * operations remain, and termination requires full target conformance.
  */
-[[nodiscard]] ActionMask legalActions(const CompilerState& state,
-                                      const ActionMask& suppressed);
+[[nodiscard]] ActionMask legalActions(const CompilerState& state);
 
 /**
  * A dependency-free actor used to exercise the compiled policy boundary.

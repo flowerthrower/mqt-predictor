@@ -11,26 +11,43 @@
 from __future__ import annotations
 
 import json
+from inspect import signature
 from pathlib import Path
 
 import numpy as np
 import pytest
 from gymnasium import Env
 from gymnasium.spaces import Box, Discrete
+from gymnasium.spaces import Dict as DictSpace
 
 from mqt.predictor.compiled import (
     ACTION_NAMES,
     FEATURE_NAMES,
     TanhMlpPolicy,
     TrainingExample,
+    extract_maskable_ppo_policy,
     fit_linear_policy,
     load_training_dataset,
     target_fingerprint,
     train_maskable_ppo,
 )
-from mqt.predictor.compiled.policy import LinearPolicy, export_linear_policy, parameter_checksum
+from mqt.predictor.compiled.policy import (
+    OBSERVATION_SCHEMA,
+    V3_FEATURE_NAMES,
+    LinearPolicy,
+    export_linear_policy,
+    parameter_checksum,
+)
 
 INPUTS = Path(__file__).parents[2] / "cpp" / "test" / "Inputs"
+
+
+def test_observation_matches_predictor_v3_flat_features() -> None:
+    """The compiled actor consumes the exact 50 non-GNN Predictor v3 features."""
+    assert FEATURE_NAMES == V3_FEATURE_NAMES
+    assert tuple(sorted(FEATURE_NAMES)) == FEATURE_NAMES
+    assert len(FEATURE_NAMES) == 50
+    assert OBSERVATION_SCHEMA == "mqt-predictor-core-stages/3"
 
 
 def test_minimal_training_is_deterministic() -> None:
@@ -71,11 +88,6 @@ def test_training_fixture_only_enables_terminate_after_core_stages() -> None:
     assert terminal_samples
     assert all(sample["action"] == "terminate" for sample in terminal_samples)
     assert all(sample["legal"][3:] == [False, False, True] for sample in terminal_samples)
-    place_count = FEATURE_NAMES.index("place-and-route_count")
-    synthesis_count = FEATURE_NAMES.index("synthesize-for-target_count")
-    assert all(
-        sample["features"][place_count] > 0 and sample["features"][synthesis_count] > 0 for sample in terminal_samples
-    )
 
 
 def test_policy_masks_illegal_actions() -> None:
@@ -126,7 +138,7 @@ def test_training_accepts_preterminal_stage_mask() -> None:
 
 @pytest.mark.parametrize("invalid_operation", ["cnot", "U", " cx "])
 def test_target_fingerprint_rejects_noncanonical_operations(tmp_path: Path, invalid_operation: str) -> None:
-    """The exporter rejects spellings rejected by the C++ v1 loader."""
+    """The exporter rejects spellings rejected by the C++ target loader."""
     document = json.loads((INPUTS / "line-4-target.json").read_text(encoding="utf-8"))
     document["operations"][1]["name"] = invalid_operation
     target = tmp_path / "target.json"
@@ -167,20 +179,24 @@ def test_export_accepts_runtime_target_fingerprint(tmp_path: Path) -> None:
 class _MinimalMaskedEnv(Env):
     """Two-step environment for checking the deployable actor shape."""
 
-    observation_space = Box(0.0, 1.0, shape=(len(FEATURE_NAMES),), dtype=np.float32)
+    observation_space = DictSpace({name: Box(0.0, 1.0, shape=(1,), dtype=np.float32) for name in FEATURE_NAMES})
     action_space = Discrete(len(ACTION_NAMES))
+
+    @staticmethod
+    def _observation(value: float) -> dict[str, np.ndarray]:
+        return {name: np.asarray([value], dtype=np.float32) for name in FEATURE_NAMES}
 
     def reset(
         self,
         *,
         seed: int | None = None,
         options: dict[str, object] | None = None,
-    ) -> tuple[np.ndarray, dict[str, object]]:
+    ) -> tuple[dict[str, np.ndarray], dict[str, object]]:
         super().reset(seed=seed, options=options)
-        return np.zeros(len(FEATURE_NAMES), dtype=np.float32), {}
+        return self._observation(0.0), {}
 
-    def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, object]]:
-        observation = np.full(len(FEATURE_NAMES), 0.5, dtype=np.float32)
+    def step(self, action: int) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, object]]:
+        observation = self._observation(0.5)
         return observation, float(action == 0), True, False, {}
 
     def action_masks(self) -> list[bool]:
@@ -188,26 +204,54 @@ class _MinimalMaskedEnv(Env):
 
 
 def test_maskable_ppo_trains_deployable_tanh_actor() -> None:
-    """Minimal PPO training returns the fixed compact ONNX actor."""
-    policy = train_maskable_ppo(_MinimalMaskedEnv(), timesteps=2, seed=7)
+    """Minimal PPO training keeps the exact Predictor v3 actor shape."""
+    policy = train_maskable_ppo(_MinimalMaskedEnv(), timesteps=2, seed=7, n_steps=2, batch_size=2, n_epochs=1)
 
     assert isinstance(policy, TanhMlpPolicy)
-    assert policy.hidden_weights.shape == (16, len(FEATURE_NAMES))
-    assert policy.hidden_bias.shape == (16,)
-    assert policy.output_weights.shape == (len(ACTION_NAMES), 16)
+    assert policy.first_hidden_weights.shape == (64, len(FEATURE_NAMES))
+    assert policy.first_hidden_bias.shape == (64,)
+    assert policy.second_hidden_weights.shape == (64, 64)
+    assert policy.second_hidden_bias.shape == (64,)
+    assert policy.output_weights.shape == (len(ACTION_NAMES), 64)
     assert policy.output_bias.shape == (len(ACTION_NAMES),)
 
 
-def test_maskable_ppo_rejects_rollout_larger_than_training_budget() -> None:
-    """Requested timesteps remain an upper bound on compiler transitions."""
-    with pytest.raises(ValueError, match="parameters are invalid"):
-        train_maskable_ppo(_MinimalMaskedEnv(), timesteps=2, rollout_steps=3)
+def test_maskable_ppo_defaults_match_predictor_v3() -> None:
+    """Training defaults retain the PPO rollout and optimizer contract from PR 798."""
+    parameters = signature(train_maskable_ppo).parameters
+
+    assert parameters["timesteps"].default == 1000
+    assert parameters["n_steps"].default == 2048
+    assert parameters["batch_size"].default == 64
+    assert parameters["n_epochs"].default == 10
 
 
-def test_maskable_ppo_retains_linear_actor_ablation() -> None:
-    """The direct-linear actor remains available as an experiment baseline."""
-    policy = train_maskable_ppo(_MinimalMaskedEnv(), timesteps=2, seed=7, hidden_dim=0)
+def test_maskable_ppo_extractor_preserves_pytorch_logits_and_critic_shape() -> None:
+    """Actor export is numerically equivalent and the training critic stays 64x64."""
+    torch = pytest.importorskip("torch")
+    maskable_ppo_class = pytest.importorskip("sb3_contrib").MaskablePPO
+    multi_input_policy = pytest.importorskip("sb3_contrib.common.maskable.policies").MaskableMultiInputActorCriticPolicy
+    model = maskable_ppo_class(
+        multi_input_policy,
+        _MinimalMaskedEnv(),
+        n_steps=2,
+        batch_size=2,
+        n_epochs=1,
+        gamma=0.98,
+        seed=7,
+        device="cpu",
+    )
+    actor = extract_maskable_ppo_policy(model)
+    features = np.linspace(0.0, 1.0, len(FEATURE_NAMES), dtype=np.float32)
+    named_features = {name: np.asarray([features[index]], dtype=np.float32) for index, name in enumerate(FEATURE_NAMES)}
+    observation, _ = model.policy.obs_to_tensor(named_features)
+    with torch.no_grad():
+        extracted_features = model.policy.extract_features(observation)
+        latent_actor = model.policy.mlp_extractor.forward_actor(extracted_features)
+        expected = model.policy.action_net(latent_actor).cpu().numpy()[0]
 
-    assert isinstance(policy, LinearPolicy)
-    assert policy.weights.shape == (len(ACTION_NAMES), len(FEATURE_NAMES))
-    assert policy.bias.shape == (len(ACTION_NAMES),)
+    np.testing.assert_allclose(actor.logits(features.tolist()), expected, rtol=1e-6, atol=1e-6)
+    value_layers = model.policy.mlp_extractor.value_net
+    assert (value_layers[0].in_features, value_layers[0].out_features) == (len(FEATURE_NAMES), 64)
+    assert (value_layers[2].in_features, value_layers[2].out_features) == (64, 64)
+    assert model.policy.ortho_init is True
