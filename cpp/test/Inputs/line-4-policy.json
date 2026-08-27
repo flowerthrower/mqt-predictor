@@ -92,6 +92,6 @@
     "objective": "manually curated ABI smoke samples; not a reproducible Core trajectory or performance dataset",
     "samples": 20,
     "seed": 7,
-    "source_revision": "pending-experiment-deployment-commit"
+    "source_revision": "3cec5337e28335e58709c1a3fe084027c16f96f3"
   }
 }
