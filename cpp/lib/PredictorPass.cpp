@@ -442,24 +442,41 @@ private:
   runBootstrap(const ::mlir::ModuleOp module, const Target& target,
                const std::string_view targetFingerprint,
                const PolicyModel* model) {
-    ::mlir::OpPassManager cleanup(::mlir::ModuleOp::getOperationName());
-    ::populateQCOCleanupPipeline(cleanup);
-    if (failed(runPipeline(cleanup, module))) {
+    ::mlir::OpPassManager preparation(::mlir::ModuleOp::getOperationName());
+    ::populateQCOCleanupPipeline(preparation);
+    ::populateDecomposeMultiControlledPipeline(preparation, 3);
+    if (failed(runPipeline(preparation, module))) {
       return ::mlir::failure();
     }
+    const auto initialAnalysis = analyzeCircuit(module, target);
+    if (failed(initialAnalysis)) {
+      return ::mlir::failure();
+    }
+    if (model != nullptr && !initialAnalysis->fullyUnmapped) {
+      if (options_.trace) {
+        llvm::errs() << "[mqt-predictor] model policy requires an initially "
+                        "fully unmapped program\n";
+      }
+      return ::mlir::failure();
+    }
+    const auto logicalQubits = initialAnalysis->features.numQubits;
+    CompilerState policyState{};
 
     BootstrapLinearPolicy policy;
     std::mt19937_64 generator(options_.samplingSeed);
     std::set<std::pair<std::string, std::size_t>> attemptedTransitions;
     std::array<std::size_t, actionIndex(Action::Terminate)> actionCounts{};
     for (std::size_t step = 0;;) {
-      auto analysis = analyzeCircuit(module, target);
+      auto analysis = analyzeCircuit(module, target, logicalQubits);
       if (failed(analysis)) {
         if (options_.trace) {
           llvm::errs() << "[mqt-predictor] unsupported QCO structure at step "
                        << step << '\n';
         }
         return ::mlir::failure();
+      }
+      if (model != nullptr) {
+        analysis->state = policyState;
       }
 
       const auto moduleBefore = moduleFingerprint(module);
@@ -470,10 +487,20 @@ private:
             static_cast<float>(actionCounts[action]) / denominator;
       }
       ActionMask suppressed{};
+      const auto remaining = options_.maxSteps - step;
+      const auto reserveMapping = remaining == 2 && (!analysis->state.mapped ||
+                                                     !analysis->state.routed);
+      const auto reserveFinalStage =
+          remaining == 1 && analysis->state.mapped && analysis->state.routed;
       for (std::size_t action = 0; action < actionCounts.size(); ++action) {
+        const auto candidate = static_cast<Action>(action);
         suppressed[action] =
             step >= options_.maxSteps ||
-            attemptedTransitions.contains({moduleBefore, action});
+            (reserveMapping && candidate != Action::PlaceAndRoute) ||
+            (reserveFinalStage && (analysis->state.synthesized ||
+                                   candidate != Action::SynthesizeForTarget)) ||
+            (isOptimizationAction(candidate) &&
+             attemptedTransitions.contains({moduleBefore, action}));
       }
       const auto legal = legalActions(analysis->state, suppressed);
       const auto decision =
@@ -488,18 +515,33 @@ private:
       if (decision->action == Action::Terminate) {
         traceDecision(step, *analysis, *decision, target, targetFingerprint,
                       legal, model);
-        return runCorePipeline(module, target);
+        ::mlir::OpPassManager verification(
+            ::mlir::ModuleOp::getOperationName());
+        verification.addPass(
+            ::mlir::qco::createVerifyTargetConformance(target));
+        return runPipeline(verification, module);
       }
       traceDecision(step, *analysis, *decision, target, targetFingerprint,
                     legal, model);
 
-      if (failed(runAction(module, decision->action))) {
+      if (failed(runAction(module, decision->action, target))) {
         return ::mlir::failure();
       }
       const auto selectedAction = actionIndex(decision->action);
       attemptedTransitions.emplace(moduleBefore, selectedAction);
       ++actionCounts[selectedAction];
       const auto changed = moduleBefore != moduleFingerprint(module);
+      if (model != nullptr) {
+        if (isOptimizationAction(decision->action) && changed) {
+          policyState.synthesized = false;
+        } else if (decision->action == Action::PlaceAndRoute) {
+          policyState.mapped = true;
+          policyState.routed = true;
+          policyState.synthesized = false;
+        } else if (decision->action == Action::SynthesizeForTarget) {
+          policyState.synthesized = true;
+        }
+      }
       if (!changed) {
         if (options_.trace) {
           llvm::errs() << "[mqt-predictor] no-effect action="
@@ -511,16 +553,18 @@ private:
   }
 
   [[nodiscard]] ::mlir::LogicalResult runAction(const ::mlir::ModuleOp module,
-                                                const Action action) {
+                                                const Action action,
+                                                const Target& target) {
     ::mlir::OpPassManager pipeline(::mlir::ModuleOp::getOperationName());
-    if (failed(populateActionPipeline(pipeline, action))) {
+    if (failed(populateActionPipeline(pipeline, action, target))) {
       return ::mlir::failure();
     }
     return runPipeline(pipeline, module);
   }
 
   [[nodiscard]] static ::mlir::LogicalResult
-  populateActionPipeline(::mlir::OpPassManager& pipeline, const Action action) {
+  populateActionPipeline(::mlir::OpPassManager& pipeline, const Action action,
+                         const Target& target) {
     switch (action) {
     case Action::MergeSingleQubitRotationGates:
       pipeline.addPass(::mlir::qco::createMergeSingleQubitRotationGates());
@@ -531,11 +575,15 @@ private:
       pipeline.addPass(::mlir::qco::createFuseSingleQubitUnitaryRuns(options));
       break;
     }
-    case Action::DecomposeMultiControlled:
-      ::populateDecomposeMultiControlledPipeline(pipeline, 3);
+    case Action::FuseTwoQubitGates:
+      pipeline.addPass(::mlir::qco::createFuseTwoQubitGates());
       break;
-    case Action::HadamardLifting:
-      pipeline.addPass(::mlir::qco::createHadamardLifting());
+    case Action::PlaceAndRoute:
+      ::populateQCOCleanupPipeline(pipeline);
+      pipeline.addPass(::mlir::qco::createMappingPass(target, {}));
+      break;
+    case Action::SynthesizeForTarget:
+      populateTargetFinalizationPipeline(pipeline, target);
       break;
     case Action::Terminate:
     case Action::Count:

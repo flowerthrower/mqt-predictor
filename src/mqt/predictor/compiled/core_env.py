@@ -32,6 +32,8 @@ if TYPE_CHECKING:
 
 NUM_TRANSFORM_ACTIONS = len(ACTION_NAMES) - 1
 TERMINATE_ACTION = len(ACTION_NAMES) - 1
+PLACE_AND_ROUTE_ACTION = 3
+SYNTHESIZE_ACTION = 4
 DEPTH_NORMALIZATION_MAX = 1_000_000.0
 
 
@@ -57,9 +59,15 @@ class _QCOProgram(Protocol):
 
     def fuse_single_qubit_unitary_runs(self, *, basis: str = "zyz") -> None: ...
 
+    def fuse_two_qubit_gates(self) -> None: ...
+
     def decompose_multi_controlled(self) -> None: ...
 
-    def lift_hadamards(self) -> None: ...
+    def place_and_route(self, target: object) -> None: ...
+
+    def synthesize_for_target(self, target: object) -> None: ...
+
+    def verify_target_conformance(self, target: object) -> None: ...
 
     def compile_for_target(self, target: object) -> None: ...
 
@@ -113,7 +121,7 @@ def _circuit_metrics(circuit: QuantumCircuit) -> CompileMetrics:
     )
 
 
-def _score(metrics: CompileMetrics, baseline: CompileMetrics, pass_count: int) -> float:
+def _score(metrics: CompileMetrics, baseline: CompileMetrics) -> float:
     """Score target-compiled quality relative to Core's canonical pipeline."""
     weighted_improvement = 0.0
     for weight, candidate, reference in zip(
@@ -123,10 +131,14 @@ def _score(metrics: CompileMetrics, baseline: CompileMetrics, pass_count: int) -
         strict=True,
     ):
         weighted_improvement += weight * (reference - candidate) / max(reference, 1)
-    return weighted_improvement - PASS_PENALTY * pass_count
+    return weighted_improvement
 
 
-def _structural_features(circuit: QuantumCircuit) -> tuple[int, float, float, float, float, float, bool]:
+def _structural_features(
+    circuit: QuantumCircuit,
+    *,
+    num_qubits: int,
+) -> tuple[int, float, float, float, float, float]:
     """Reproduce the straight-line feature scan used by the C++ runtime."""
     states = [(0, 0)] * circuit.num_qubits
     interactions: set[tuple[int, int]] = set()
@@ -134,7 +146,6 @@ def _structural_features(circuit: QuantumCircuit) -> tuple[int, float, float, fl
     num_two_qubit_gates = 0
     activity = 0
     maximum = (0, 0)
-    has_wide_unitary = False
 
     for instruction in circuit.data:
         operation = instruction.operation
@@ -151,7 +162,6 @@ def _structural_features(circuit: QuantumCircuit) -> tuple[int, float, float, fl
             activity += len(qubits)
         else:
             is_two_qubit = len(qubits) == 2
-            has_wide_unitary |= len(qubits) > 2
             next_state = (prior[0] + 1, prior[1] + int(is_two_qubit))
             num_gates += 1
             num_two_qubit_gates += int(is_two_qubit)
@@ -163,13 +173,12 @@ def _structural_features(circuit: QuantumCircuit) -> tuple[int, float, float, fl
         maximum = max(maximum, next_state)
 
     depth, two_qubit_critical_depth = maximum
-    num_qubits = circuit.num_qubits
     communication = 2 * len(interactions) / (num_qubits * (num_qubits - 1)) if num_qubits > 1 else 0.0
     critical_depth = two_qubit_critical_depth / num_two_qubit_gates if num_two_qubit_gates else 0.0
     entanglement_ratio = num_two_qubit_gates / num_gates if num_gates else 0.0
     parallelism = max(((num_gates / depth) - 1) / (num_qubits - 1), 0.0) if num_qubits > 1 and depth else 0.0
     liveness = activity / (num_qubits * depth) if num_qubits and depth else 0.0
-    return depth, communication, critical_depth, entanglement_ratio, parallelism, liveness, has_wide_unitary
+    return depth, communication, critical_depth, entanglement_ratio, parallelism, liveness
 
 
 class CorePredictorEnv(Env):
@@ -211,13 +220,18 @@ class CorePredictorEnv(Env):
         self.observation_space = Box(low=0.0, high=1.0, shape=(len(FEATURE_NAMES),), dtype=np.float32)
 
         self._program: _QCOProgram | None = None
-        self._compiled = False
-        self._has_wide_unitary = False
+        self._mapped = False
+        self._routed = False
+        self._synthesized = False
         self._circuit_index = 0
+        self._num_qubits = 0
         self._num_passes = 0
         self._action_counts = np.zeros(NUM_TRANSFORM_ACTIONS, dtype=np.int64)
         self._attempted: set[tuple[str, int]] = set()
         self._baseline_cache: dict[int, CompileMetrics] = {}
+        self._potential_cache: dict[tuple[int, str, bool, bool, bool], float] = {}
+        self._current_potential = 0.0
+        self._last_observation = np.zeros(len(FEATURE_NAMES), dtype=np.float32)
         self.used_actions: list[str] = []
 
     @property
@@ -233,37 +247,65 @@ class CorePredictorEnv(Env):
         """The number of transformation actions in this episode."""
         return self._num_passes
 
-    def _fingerprint(self) -> str:
-        return hashlib.sha256(self.program.ir.encode()).hexdigest()
+    def _fingerprint(self, program: _QCOProgram | None = None) -> str:
+        source = self.program if program is None else program
+        return hashlib.sha256(source.ir.encode()).hexdigest()
 
-    def _as_qiskit(self, program: _QCOProgram, *, compiled: bool) -> QuantumCircuit:
+    def _as_qiskit(self, program: _QCOProgram, *, mapped: bool) -> QuantumCircuit:
         qc_program = program.copy().to_qc()
-        return qc_program.to_qiskit(target=self.target if compiled else None)
+        return qc_program.to_qiskit(target=self.target if mapped else None)
 
     def _metrics(self, program: _QCOProgram) -> CompileMetrics:
-        return _circuit_metrics(self._as_qiskit(program, compiled=True))
+        return _circuit_metrics(self._as_qiskit(program, mapped=True))
 
-    def _baseline(self) -> CompileMetrics:
+    def _baseline(self, program: _QCOProgram | None = None) -> CompileMetrics:
         if self._circuit_index not in self._baseline_cache:
-            candidate = self.program.copy()
+            source = self.program if program is None else program
+            candidate = source.copy()
             candidate.compile_for_target(self.target)
             self._baseline_cache[self._circuit_index] = self._metrics(candidate)
         return self._baseline_cache[self._circuit_index]
+
+    def _potential(
+        self,
+        program: _QCOProgram,
+        *,
+        mapped: bool,
+        routed: bool,
+        synthesized: bool,
+    ) -> float:
+        """Score a state after completing it with the staged Core pipeline."""
+        key = (self._circuit_index, self._fingerprint(program), mapped, routed, synthesized)
+        if key not in self._potential_cache:
+            candidate = program.copy()
+            needs_synthesis = not synthesized
+            if not mapped or not routed:
+                candidate.place_and_route(self.target)
+                needs_synthesis = True
+            if needs_synthesis:
+                candidate.synthesize_for_target(self.target)
+            candidate.verify_target_conformance(self.target)
+            self._potential_cache[key] = _score(self._metrics(candidate), self._baseline(program))
+        return self._potential_cache[key]
 
     def _observation_for(
         self,
         program: _QCOProgram,
         *,
-        compiled: bool,
+        mapped: bool,
+        num_qubits: int,
         num_passes: int,
         action_counts: NDArray[np.int64],
-    ) -> tuple[NDArray[np.float32], bool]:
-        circuit = self._as_qiskit(program, compiled=compiled)
-        depth, communication, critical_depth, entanglement_ratio, parallelism, liveness, has_wide_unitary = (
-            _structural_features(circuit)
+    ) -> NDArray[np.float32]:
+        circuit = self._as_qiskit(program, mapped=mapped)
+        # Target-aware Core export materializes the full device register. Keep
+        # the episode's logical width so these features match the C++ analysis.
+        depth, communication, critical_depth, entanglement_ratio, parallelism, liveness = _structural_features(
+            circuit,
+            num_qubits=num_qubits,
         )
         values = [
-            circuit.num_qubits / self.target.num_qubits,
+            num_qubits / self.target.num_qubits,
             math.log1p(depth) / math.log1p(DEPTH_NORMALIZATION_MAX),
             communication,
             critical_depth,
@@ -273,16 +315,17 @@ class CorePredictorEnv(Env):
             num_passes / MAX_PASSES,
             *(count / MAX_PASSES for count in action_counts),
         ]
-        return np.clip(np.asarray(values, dtype=np.float32), 0.0, 1.0), has_wide_unitary
+        return np.clip(np.asarray(values, dtype=np.float32), 0.0, 1.0)
 
-    def _observation(self) -> NDArray[np.float32]:
-        observation, _ = self._observation_for(
-            self.program,
-            compiled=self._compiled,
-            num_passes=self._num_passes,
-            action_counts=self._action_counts,
-        )
-        return observation
+    def _is_conformant(self) -> bool:
+        return self._mapped and self._routed and self._synthesized
+
+    def _state_info(self) -> dict[str, bool]:
+        return {
+            "mapped": self._mapped,
+            "routed": self._routed,
+            "synthesized": self._synthesized,
+        }
 
     def reset(
         self,
@@ -305,30 +348,56 @@ class CorePredictorEnv(Env):
         if circuit.num_qubits > self.target.num_qubits:
             msg = "The selected circuit contains more qubits than the compiler target."
             raise ValueError(msg)
-        self._program = self._compiler.QCProgram.from_qiskit(circuit).to_qco()
-        self._program.cleanup()
-        self._compiled = False
-        self._num_passes = 0
-        self._action_counts.fill(0)
-        self._attempted.clear()
-        self.used_actions = []
-        baseline = self._baseline()
-        observation, self._has_wide_unitary = self._observation_for(
-            self.program,
-            compiled=False,
+        program = self._compiler.QCProgram.from_qiskit(circuit).to_qco()
+        program.cleanup()
+        program.decompose_multi_controlled()
+        baseline = self._baseline(program)
+        action_counts = np.zeros(NUM_TRANSFORM_ACTIONS, dtype=np.int64)
+        observation = self._observation_for(
+            program,
+            mapped=False,
+            num_qubits=circuit.num_qubits,
             num_passes=0,
-            action_counts=self._action_counts,
+            action_counts=action_counts,
         )
-        return observation, {"baseline": asdict(baseline), "circuit_index": self._circuit_index}
+        potential = self._potential(program, mapped=False, routed=False, synthesized=False)
+
+        self._program = program
+        self._mapped = False
+        self._routed = False
+        self._synthesized = False
+        self._num_qubits = circuit.num_qubits
+        self._num_passes = 0
+        self._action_counts = action_counts
+        self._attempted.clear()
+        self._current_potential = potential
+        self._last_observation = observation
+        self.used_actions = []
+        return observation, {
+            "baseline": asdict(baseline),
+            "circuit_index": self._circuit_index,
+            "potential": potential,
+            **self._state_info(),
+        }
 
     def action_masks(self) -> list[bool]:
         """Return legal actions, suppressing no-op retries on identical IR."""
-        if self._num_passes >= self.max_passes:
-            return [False] * NUM_TRANSFORM_ACTIONS + [True]
         fingerprint = self._fingerprint()
-        transforms = [(fingerprint, action) not in self._attempted for action in range(NUM_TRANSFORM_ACTIONS)]
-        transforms[1] &= not self._has_wide_unitary
-        return [*transforms, True]
+        transforms = [self._num_passes < self.max_passes] * NUM_TRANSFORM_ACTIONS
+        transforms[PLACE_AND_ROUTE_ACTION] &= not self._mapped
+        transforms[SYNTHESIZE_ACTION] &= not self._synthesized
+        for action in range(PLACE_AND_ROUTE_ACTION):
+            transforms[action] &= (fingerprint, action) not in self._attempted
+
+        remaining = self.max_passes - self._num_passes
+        if remaining == 2 and (not self._mapped or not self._routed):
+            transforms = [False] * NUM_TRANSFORM_ACTIONS
+            transforms[PLACE_AND_ROUTE_ACTION] = True
+        elif remaining == 1 and self._mapped and self._routed:
+            transforms = [False] * NUM_TRANSFORM_ACTIONS
+            if not self._synthesized:
+                transforms[SYNTHESIZE_ACTION] = True
+        return [*transforms, self._is_conformant()]
 
     @staticmethod
     def _apply_transform(program: _QCOProgram, action: int) -> None:
@@ -337,19 +406,76 @@ class CorePredictorEnv(Env):
         elif action == 1:
             program.fuse_single_qubit_unitary_runs(basis="u")
         elif action == 2:
-            program.decompose_multi_controlled()
+            program.fuse_two_qubit_gates()
         elif action == 3:
-            program.lift_hadamards()
+            msg = "place-and-route requires a compiler target"
+            raise AssertionError(msg)
+        elif action == 4:
+            msg = "target synthesis requires a compiler target"
+            raise AssertionError(msg)
+
+    def _apply_action(self, program: _QCOProgram, action: int) -> None:
+        if action == PLACE_AND_ROUTE_ACTION:
+            program.place_and_route(self.target)
+        elif action == SYNTHESIZE_ACTION:
+            program.synthesize_for_target(self.target)
+        else:
+            self._apply_transform(program, action)
 
     def _failed_step(
         self,
         error: Exception,
     ) -> tuple[NDArray[np.float32], float, bool, bool, dict[str, object]]:
-        reward = -2.0 - PASS_PENALTY * self._num_passes
-        return self._observation(), reward, False, True, {"error": f"{type(error).__name__}: {error}"}
+        return self._last_observation.copy(), -2.0, False, True, {"error": f"{type(error).__name__}: {error}"}
+
+    def _evaluate_action(
+        self,
+        action: int,
+    ) -> tuple[_QCOProgram, NDArray[np.float32], NDArray[np.int64], bool, bool, bool, bool, float]:
+        """Apply and evaluate one action without changing episode state."""
+        before = self.program.ir
+        candidate = self.program.copy()
+        candidate_counts = self._action_counts.copy()
+        candidate_counts[action] += 1
+        self._apply_action(candidate, action)
+        changed = before != candidate.ir
+        candidate_mapped = self._mapped
+        candidate_routed = self._routed
+        candidate_synthesized = self._synthesized
+        if action < PLACE_AND_ROUTE_ACTION and changed:
+            candidate_synthesized = False
+        elif action == PLACE_AND_ROUTE_ACTION:
+            candidate_mapped = True
+            candidate_routed = True
+            candidate_synthesized = False
+        elif action == SYNTHESIZE_ACTION:
+            candidate_synthesized = True
+        potential = self._potential(
+            candidate,
+            mapped=candidate_mapped,
+            routed=candidate_routed,
+            synthesized=candidate_synthesized,
+        )
+        observation = self._observation_for(
+            candidate,
+            mapped=candidate_mapped,
+            num_qubits=self._num_qubits,
+            num_passes=self._num_passes + 1,
+            action_counts=candidate_counts,
+        )
+        return (
+            candidate,
+            observation,
+            candidate_counts,
+            changed,
+            candidate_mapped,
+            candidate_routed,
+            candidate_synthesized,
+            potential,
+        )
 
     def step(self, action: int) -> tuple[NDArray[np.float32], float, bool, bool, dict[str, object]]:
-        """Apply one pass or compile the persistent program for the target."""
+        """Apply one Core stage or verify an already conformant program."""
         if not self.action_space.contains(action):
             msg = f"Action {action} is not supported."
             raise ValueError(msg)
@@ -361,52 +487,75 @@ class CorePredictorEnv(Env):
         if action == TERMINATE_ACTION:
             candidate = self.program.copy()
             try:
-                candidate.compile_for_target(self.target)
+                candidate.verify_target_conformance(self.target)
                 metrics = self._metrics(candidate)
-                observation, has_wide_unitary = self._observation_for(
+                observation = self._observation_for(
                     candidate,
-                    compiled=True,
+                    mapped=True,
+                    num_qubits=self._num_qubits,
                     num_passes=self._num_passes,
                     action_counts=self._action_counts,
                 )
             except Exception as error:  # ruff:ignore[blind-except]
                 return self._failed_step(error)
             self._program = candidate
-            self._compiled = True
-            self._has_wide_unitary = has_wide_unitary
+            self._last_observation = observation
             self.used_actions.append(ACTION_NAMES[action])
-            reward = _score(metrics, self._baseline(), self._num_passes)
+            reward = _score(metrics, self._baseline())
             return (
                 observation,
                 reward,
                 True,
                 False,
-                {"baseline": asdict(self._baseline()), "metrics": asdict(metrics), "passes": self._num_passes},
+                {
+                    "baseline": asdict(self._baseline()),
+                    "metrics": asdict(metrics),
+                    "passes": self._num_passes,
+                    "potential": reward,
+                    **self._state_info(),
+                },
             )
 
         fingerprint = self._fingerprint()
-        before = self.program.ir
-        candidate = self.program.copy()
-        candidate_counts = self._action_counts.copy()
-        candidate_counts[action] += 1
         try:
-            self._apply_transform(candidate, action)
-            observation, has_wide_unitary = self._observation_for(
+            (
                 candidate,
-                compiled=False,
-                num_passes=self._num_passes + 1,
-                action_counts=candidate_counts,
-            )
+                observation,
+                candidate_counts,
+                changed,
+                candidate_mapped,
+                candidate_routed,
+                candidate_synthesized,
+                potential,
+            ) = self._evaluate_action(action)
         except Exception as error:  # ruff:ignore[blind-except]
             return self._failed_step(error)
         self._program = candidate
-        self._compiled = False
-        self._has_wide_unitary = has_wide_unitary
-        self._attempted.add((fingerprint, action))
+        self._mapped = candidate_mapped
+        self._routed = candidate_routed
+        self._synthesized = candidate_synthesized
+        if action < PLACE_AND_ROUTE_ACTION:
+            self._attempted.add((fingerprint, action))
         self._num_passes += 1
         self._action_counts = candidate_counts
+        self._last_observation = observation
         self.used_actions.append(ACTION_NAMES[action])
-        return observation, 0.0, False, False, {"changed": before != candidate.ir}
+        reward = potential - self._current_potential - PASS_PENALTY
+        self._current_potential = potential
+        truncated = self._num_passes >= self.max_passes and not self._is_conformant()
+        if truncated:
+            reward -= 2.0
+        return (
+            observation,
+            reward,
+            False,
+            truncated,
+            {
+                "changed": changed,
+                "potential": potential,
+                **self._state_info(),
+            },
+        )
 
 
 __all__ = ["CorePredictorEnv"]

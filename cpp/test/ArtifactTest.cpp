@@ -41,19 +41,19 @@ int main(const int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
-  const FeatureVector features{0.5F,  0.3F, 0.7F, 0.8F, 0.75F, 0.25F,
-                               0.55F, 0.0F, 0.0F, 0.0F, 0.0F,  0.0F};
-  const ActionMask legal{true, true, true, true, false};
+  const FeatureVector features{0.5F, 0.3F, 0.7F, 0.8F, 0.75F, 0.25F, 0.55F,
+                               0.0F, 0.0F, 0.0F, 0.0F, 0.0F,  0.0F};
+  const ActionMask legal{true, true, true, true, true, false};
   const auto decision = model->select(features, legal);
-  if (!decision || decision->action != Action::DecomposeMultiControlled) {
+  if (!decision || decision->action != Action::PlaceAndRoute) {
     std::cerr << "native model did not reproduce the exported decision\n";
     return EXIT_FAILURE;
   }
 
   std::mt19937_64 generator(7);
-  const ActionMask onlyHadamard{false, false, false, true, false};
-  const auto sampled = model->sample(features, onlyHadamard, generator);
-  if (!sampled || sampled->action != Action::HadamardLifting) {
+  const ActionMask onlyMapping{false, false, false, true, false, false};
+  const auto sampled = model->sample(features, onlyMapping, generator);
+  if (!sampled || sampled->action != Action::PlaceAndRoute) {
     std::cerr << "native model did not respect the sampled action mask\n";
     return EXIT_FAILURE;
   }

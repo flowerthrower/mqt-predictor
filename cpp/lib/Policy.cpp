@@ -21,19 +21,21 @@ namespace {
 constexpr auto WEIGHTS =
     std::array<std::array<float, NUM_FEATURES>, NUM_ACTIONS>{
         std::array{0.00F, 1.60F, 0.00F, 0.00F, -0.20F, 0.00F, 0.10F, 0.00F,
-                   0.00F, 0.00F, 0.00F, 0.00F},
+                   0.00F, 0.00F, 0.00F, 0.00F, 0.00F},
         std::array{0.00F, 1.30F, 0.00F, 0.00F, -0.15F, 0.00F, 0.00F, 0.00F,
-                   0.00F, 0.00F, 0.00F, 0.00F},
-        std::array{0.00F, 0.10F, 0.35F, 0.25F, 0.35F, 0.00F, 0.00F, 0.00F,
-                   0.00F, 0.00F, 0.00F, 0.00F},
-        std::array{0.00F, 0.00F, 0.20F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F,
-                   0.00F, 0.00F, 0.00F, 0.00F},
+                   0.00F, 0.00F, 0.00F, 0.00F, 0.00F},
+        std::array{0.00F, 0.00F, 0.00F, 0.05F, 0.12F, 0.00F, 0.00F, 0.00F,
+                   0.00F, 0.00F, 0.00F, 0.00F, 0.00F},
         std::array{0.00F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F,
-                   0.00F, 0.00F, 0.00F, 0.00F},
+                   0.00F, 0.00F, 0.00F, 0.00F, 0.00F},
+        std::array{0.00F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F,
+                   0.00F, 0.00F, 0.00F, 0.00F, 0.00F},
+        std::array{0.00F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F, 0.00F,
+                   0.00F, 0.00F, 0.00F, 0.00F, 0.00F},
     };
 
 constexpr auto BIASES =
-    std::array<float, NUM_ACTIONS>{0.05F, 0.04F, 0.03F, 0.02F, 0.25F};
+    std::array<float, NUM_ACTIONS>{0.05F, 0.04F, 0.02F, 0.11F, 0.10F, 1.00F};
 
 [[nodiscard]] constexpr std::size_t index(const Action action) {
   return static_cast<std::size_t>(action);
@@ -54,7 +56,10 @@ ActionMask legalActions(const CompilerState& state,
   ActionMask legal{};
   std::transform(suppressed.begin(), suppressed.end(), legal.begin(),
                  [](const bool isSuppressed) { return !isSuppressed; });
-  legal[index(Action::FuseSingleQubitUnitaryRuns)] &= !state.hasWideUnitary;
+  legal[index(Action::PlaceAndRoute)] &= !state.mapped;
+  legal[index(Action::SynthesizeForTarget)] &= !state.synthesized;
+  legal[index(Action::Terminate)] &=
+      state.mapped && state.routed && state.synthesized;
   return legal;
 }
 

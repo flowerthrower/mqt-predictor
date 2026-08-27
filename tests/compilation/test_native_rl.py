@@ -28,21 +28,30 @@ from mqt.predictor.compiled.policy import ACTION_NAMES, FEATURE_NAMES, LinearPol
 def test_parse_sampled_native_episode() -> None:
     """The trainer consumes the C++ feature, mask, action, and metric order."""
     trace = """
-[mqt-predictor] step=0 action=merge-single-qubit-rotation-gates qubits=4 depth=8 two_qubit_depth=2 gates=12 two_qubit=3 mapped=0 routed=0 synthesized=0 legal=11111 features={relative_qubits=1,log_depth=0.2,program_communication=0.5,critical_depth=0.4,entanglement_ratio=0.25,parallelism=0.5,liveness=0.75,step_fraction=0,merge-single-qubit-rotation-gates_count=0,fuse-single-qubit-unitary-runs_count=0,decompose-multi-controlled_count=0,hadamard-lifting_count=0}
-[mqt-predictor] step=1 action=merge-single-qubit-rotation-gates qubits=4 depth=7 two_qubit_depth=2 gates=11 two_qubit=3 mapped=0 routed=0 synthesized=0 legal=11111 features={relative_qubits=1,log_depth=0.19,program_communication=0.5,critical_depth=0.4,entanglement_ratio=0.27,parallelism=0.5,liveness=0.75,step_fraction=0.01,merge-single-qubit-rotation-gates_count=0.01,fuse-single-qubit-unitary-runs_count=0,decompose-multi-controlled_count=0,hadamard-lifting_count=0}
-[mqt-predictor] step=2 action=terminate qubits=4 depth=10 two_qubit_depth=4 gates=16 two_qubit=6 mapped=1 routed=1 synthesized=1 legal=00001 features={relative_qubits=1,log_depth=0.22,program_communication=0.5,critical_depth=0.67,entanglement_ratio=0.38,parallelism=0.4,liveness=0.6,step_fraction=0.02,merge-single-qubit-rotation-gates_count=0.02,fuse-single-qubit-unitary-runs_count=0,decompose-multi-controlled_count=0,hadamard-lifting_count=0}
+[mqt-predictor] step=0 action=fuse-two-qubit-gates qubits=4 depth=8 two_qubit_depth=2 gates=12 two_qubit=3 mapped=0 routed=0 synthesized=0 legal=111110 features={relative_qubits=1,log_depth=0.2,program_communication=0.5,critical_depth=0.4,entanglement_ratio=0.25,parallelism=0.5,liveness=0.75,step_fraction=0,merge-single-qubit-rotation-gates_count=0,fuse-single-qubit-unitary-runs_count=0,fuse-two-qubit-gates_count=0,place-and-route_count=0,synthesize-for-target_count=0}
+[mqt-predictor] step=1 action=fuse-two-qubit-gates qubits=4 depth=7 two_qubit_depth=2 gates=11 two_qubit=3 mapped=0 routed=0 synthesized=0 legal=111110 features={relative_qubits=1,log_depth=0.19,program_communication=0.5,critical_depth=0.4,entanglement_ratio=0.27,parallelism=0.5,liveness=0.75,step_fraction=0.01,merge-single-qubit-rotation-gates_count=0,fuse-single-qubit-unitary-runs_count=0,fuse-two-qubit-gates_count=0.01,place-and-route_count=0,synthesize-for-target_count=0}
+[mqt-predictor] step=2 action=place-and-route qubits=4 depth=7 two_qubit_depth=2 gates=11 two_qubit=3 mapped=0 routed=0 synthesized=0 legal=111110 features={relative_qubits=1,log_depth=0.19,program_communication=0.5,critical_depth=0.4,entanglement_ratio=0.27,parallelism=0.5,liveness=0.75,step_fraction=0.02,merge-single-qubit-rotation-gates_count=0,fuse-single-qubit-unitary-runs_count=0,fuse-two-qubit-gates_count=0.02,place-and-route_count=0,synthesize-for-target_count=0}
+[mqt-predictor] step=3 action=synthesize-for-target qubits=4 depth=9 two_qubit_depth=4 gates=15 two_qubit=6 mapped=1 routed=1 synthesized=0 legal=111010 features={relative_qubits=1,log_depth=0.21,program_communication=0.5,critical_depth=0.67,entanglement_ratio=0.4,parallelism=0.4,liveness=0.6,step_fraction=0.03,merge-single-qubit-rotation-gates_count=0,fuse-single-qubit-unitary-runs_count=0,fuse-two-qubit-gates_count=0.02,place-and-route_count=0.01,synthesize-for-target_count=0}
+[mqt-predictor] step=4 action=terminate qubits=4 depth=10 two_qubit_depth=4 gates=16 two_qubit=6 mapped=1 routed=1 synthesized=1 legal=111001 features={relative_qubits=1,log_depth=0.22,program_communication=0.5,critical_depth=0.67,entanglement_ratio=0.38,parallelism=0.4,liveness=0.6,step_fraction=0.04,merge-single-qubit-rotation-gates_count=0,fuse-single-qubit-unitary-runs_count=0,fuse-two-qubit-gates_count=0.02,place-and-route_count=0.01,synthesize-for-target_count=0.01}
 """
 
     episode = parse_episode(trace)
 
     assert episode.terminated
-    assert episode.pass_count == 2
+    assert episode.pass_count == 4
     assert episode.repeated_passes == 1
     assert episode.repeated_optimizations == 1
-    assert episode.action_counts == {"merge-single-qubit-rotation-gates": 2, "terminate": 1}
+    assert episode.action_counts == {
+        "fuse-two-qubit-gates": 2,
+        "place-and-route": 1,
+        "synthesize-for-target": 1,
+        "terminate": 1,
+    }
     assert episode.actions == (
-        "merge-single-qubit-rotation-gates",
-        "merge-single-qubit-rotation-gates",
+        "fuse-two-qubit-gates",
+        "fuse-two-qubit-gates",
+        "place-and-route",
+        "synthesize-for-target",
         "terminate",
     )
     assert episode.final_metrics == CompileMetrics(two_qubit_depth=4, two_qubit=6, depth=10, gates=16)
@@ -51,7 +60,7 @@ def test_parse_sampled_native_episode() -> None:
 def test_parse_exhaustive_single_use_result() -> None:
     """The comparison baseline is the best exhaustive one-use ordering."""
     trace = """
-[mqt-predictor] search-result winner=7 schedule=merge-single-qubit-rotation-gates>hadamard-lifting valid=17 unique_outputs=14 two_qubit_depth=4 two_qubit=6 depth=10 gates=16 total_compile_us=42
+[mqt-predictor] search-result winner=7 schedule=merge-single-qubit-rotation-gates>fuse-two-qubit-gates valid=17 unique_outputs=14 two_qubit_depth=4 two_qubit=6 depth=10 gates=16 total_compile_us=42
 """
 
     assert parse_exhaustive_metrics(trace) == CompileMetrics(two_qubit_depth=4, two_qubit=6, depth=10, gates=16)
@@ -63,13 +72,13 @@ def test_terminal_reward_uses_core_relative_quality_and_pass_cost() -> None:
     transition = Transition(
         action=ACTION_NAMES.index("terminate"),
         features=(0.5,) * len(FEATURE_NAMES),
-        legal=(False, False, False, False, True),
+        legal=(False, False, False, False, False, True),
         metrics=metrics,
     )
     pass_transition = Transition(
         action=ACTION_NAMES.index("merge-single-qubit-rotation-gates"),
         features=(0.5,) * len(FEATURE_NAMES),
-        legal=(True, True, True, True, True),
+        legal=(True, True, True, True, True, False),
         metrics=metrics,
     )
     episode = Episode((pass_transition, pass_transition, transition), terminated=True, fell_back=False)
@@ -83,7 +92,7 @@ def test_reinforce_increases_positive_action_logit() -> None:
         np.zeros((len(ACTION_NAMES), len(FEATURE_NAMES)), dtype=np.float32),
         np.zeros(len(ACTION_NAMES), dtype=np.float32),
     )
-    legal = (True, True, False, False, True)
+    legal = (True, True, False, False, False, True)
     metrics = CompileMetrics(two_qubit_depth=1, two_qubit=1, depth=1, gates=1)
     positive = Episode(
         (

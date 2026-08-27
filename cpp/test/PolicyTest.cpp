@@ -35,11 +35,15 @@ int main() {
   using namespace mqt::predictor::compiler;
 
   const BootstrapLinearPolicy policy;
-  const FeatureVector features{0.6F, 0.2F, 0.0F, 0.0F, 0.0F, 0.7F,
-                               0.6F, 0.1F, 0.0F, 0.0F, 0.0F, 0.0F};
+  const FeatureVector features{0.6F, 0.2F, 0.0F, 0.0F, 0.0F, 0.7F, 0.6F,
+                               0.1F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
   ActionMask suppressed{};
 
   auto mask = legalActions({}, suppressed);
+  if (mask != ActionMask{true, true, true, true, true, false}) {
+    std::cerr << "pre-mapping phase exposed the wrong actions\n";
+    return EXIT_FAILURE;
+  }
   if (!expectAction(policy, features, mask,
                     Action::MergeSingleQubitRotationGates)) {
     return EXIT_FAILURE;
@@ -52,15 +56,43 @@ int main() {
     return EXIT_FAILURE;
   }
 
-  const CompilerState wideCircuit{.hasWideUnitary = true};
-  mask = legalActions(wideCircuit, suppressed);
-  if (mask != ActionMask{false, false, true, true, true}) {
-    std::cerr << "wide circuit did not mask single-qubit fusion\n";
+  const CompilerState synthesizedBeforeMapping{.synthesized = true};
+  mask = legalActions(synthesizedBeforeMapping, {});
+  if (mask != ActionMask{true, true, true, true, false, false}) {
+    std::cerr << "pre-mapping native phase exposed the wrong actions\n";
     return EXIT_FAILURE;
   }
-  mask = legalActions({}, suppressed);
-  if (mask != ActionMask{false, true, true, true, true}) {
-    std::cerr << "decomposed circuit did not restore single-qubit fusion\n";
+
+  const CompilerState routed{.mapped = true, .routed = true};
+  mask = legalActions(routed, {});
+  if (mask != ActionMask{true, true, true, false, true, false}) {
+    std::cerr << "routed non-native phase exposed the wrong actions\n";
+    return EXIT_FAILURE;
+  }
+
+  ActionMask attemptedOptimizations{true, true, true, false, false, false};
+  mask = legalActions(routed, attemptedOptimizations);
+  if (mask != ActionMask{false, false, false, false, true, false} ||
+      !expectAction(policy, features, mask, Action::SynthesizeForTarget)) {
+    std::cerr << "optimization retries prevented required re-synthesis\n";
+    return EXIT_FAILURE;
+  }
+
+  if (!isOptimizationAction(Action::MergeSingleQubitRotationGates) ||
+      !isOptimizationAction(Action::FuseSingleQubitUnitaryRuns) ||
+      !isOptimizationAction(Action::FuseTwoQubitGates) ||
+      isOptimizationAction(Action::PlaceAndRoute) ||
+      isOptimizationAction(Action::SynthesizeForTarget) ||
+      isOptimizationAction(Action::Terminate)) {
+    std::cerr << "exact-state suppression covered a Core stage action\n";
+    return EXIT_FAILURE;
+  }
+
+  const CompilerState compiled{
+      .mapped = true, .routed = true, .synthesized = true};
+  mask = legalActions(compiled, {});
+  if (mask != ActionMask{true, true, true, false, false, true}) {
+    std::cerr << "compiled phase exposed the wrong actions\n";
     return EXIT_FAILURE;
   }
 
@@ -69,7 +101,7 @@ int main() {
        action < static_cast<std::size_t>(Action::Terminate); ++action) {
     transformsSuppressed[action] = true;
   }
-  mask = legalActions({}, transformsSuppressed);
+  mask = legalActions(compiled, transformsSuppressed);
   if (!expectAction(policy, features, mask, Action::Terminate)) {
     return EXIT_FAILURE;
   }

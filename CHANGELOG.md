@@ -10,11 +10,6 @@ releases may include breaking changes.
 
 ## [Unreleased]
 
-### Added
-
-- ✨ Add an experimental MQT Core-only pass-ordering environment with compiled
-  ONNX policy inference.
-
 ### Changed
 
 - ✨ Replace composite BQSKit compilation actions with atomic passes ([#731])

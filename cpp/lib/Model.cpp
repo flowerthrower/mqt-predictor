@@ -238,8 +238,7 @@ LinearPolicyModel::load(const std::filesystem::path& path,
           static_cast<std::int64_t>(NUM_FEATURES) ||
       architecture->getInteger("output_size") !=
           static_cast<std::int64_t>(NUM_ACTIONS)) {
-    return modelError(path,
-                      "linear actor dimensions do not match this binary");
+    return modelError(path, "linear actor dimensions do not match this binary");
   }
 
   const auto* compatibility = root->getObject("compatibility");
@@ -576,9 +575,9 @@ validateTensorInterface(const OrtApi& api, const std::filesystem::path& path,
                            status);
   }
   if (dimensions != std::array<std::int64_t, 2>{1, expectedWidth}) {
-    return onnxModelError(
-        path, input ? "input shape does not match this binary"
-                    : "output shape does not match this binary");
+    return onnxModelError(path,
+                          input ? "input shape does not match this binary"
+                                : "output shape does not match this binary");
   }
   return llvm::Error::success();
 }
@@ -736,15 +735,15 @@ public:
       return onnxModelError(path,
                             "parameters_sha256 metadata is not a SHA-256 ID");
     }
-    for (const auto* optionalKey : {"architecture", "source_revision"}) {
+    for (const auto* requiredKey : {"architecture", "source_revision"}) {
       auto value =
-          lookupMetadata(*api, path, *metadata, *allocator, optionalKey);
+          requiredMetadata(*api, path, *metadata, *allocator, requiredKey);
       if (!value) {
         return value.takeError();
       }
-      if (*value && (*value)->empty()) {
+      if (value->empty()) {
         return onnxModelError(
-            path, (llvm::StringRef(optionalKey) + " metadata must not be empty")
+            path, (llvm::StringRef(requiredKey) + " metadata must not be empty")
                       .str());
       }
     }

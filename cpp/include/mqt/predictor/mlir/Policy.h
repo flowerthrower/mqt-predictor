@@ -19,8 +19,8 @@
 namespace mqt::predictor::compiler {
 
 inline constexpr std::string_view EXPERIMENT_SCHEMA =
-    "mqt-predictor-core-passes/1";
-inline constexpr std::size_t NUM_FEATURES = 12;
+    "mqt-predictor-core-stages/1";
+inline constexpr std::size_t NUM_FEATURES = 13;
 inline constexpr std::array<std::string_view, NUM_FEATURES> FEATURE_NAMES{
     "relative_qubits",
     "log_depth",
@@ -32,8 +32,9 @@ inline constexpr std::array<std::string_view, NUM_FEATURES> FEATURE_NAMES{
     "step_fraction",
     "merge-single-qubit-rotation-gates_count",
     "fuse-single-qubit-unitary-runs_count",
-    "decompose-multi-controlled_count",
-    "hadamard-lifting_count"};
+    "fuse-two-qubit-gates_count",
+    "place-and-route_count",
+    "synthesize-for-target_count"};
 inline constexpr double DEPTH_NORMALIZATION_MAX = 1'000'000.0;
 inline constexpr std::size_t MAX_TRANSFORM_PASSES = 100;
 
@@ -42,8 +43,9 @@ using FeatureVector = std::array<float, NUM_FEATURES>;
 enum class Action : std::uint8_t {
   MergeSingleQubitRotationGates,
   FuseSingleQubitUnitaryRuns,
-  DecomposeMultiControlled,
-  HadamardLifting,
+  FuseTwoQubitGates,
+  PlaceAndRoute,
+  SynthesizeForTarget,
   Terminate,
   Count,
 };
@@ -51,9 +53,17 @@ enum class Action : std::uint8_t {
 inline constexpr std::size_t NUM_ACTIONS =
     static_cast<std::size_t>(Action::Count);
 inline constexpr std::array<std::string_view, NUM_ACTIONS> ACTION_NAMES{
-    "merge-single-qubit-rotation-gates", "fuse-single-qubit-unitary-runs",
-    "decompose-multi-controlled", "hadamard-lifting", "terminate"};
+    "merge-single-qubit-rotation-gates",
+    "fuse-single-qubit-unitary-runs",
+    "fuse-two-qubit-gates",
+    "place-and-route",
+    "synthesize-for-target",
+    "terminate"};
 using ActionMask = std::array<bool, NUM_ACTIONS>;
+
+[[nodiscard]] constexpr bool isOptimizationAction(const Action action) {
+  return action < Action::PlaceAndRoute;
+}
 
 struct CompilerState {
   bool mapped = false;
@@ -72,8 +82,9 @@ struct Decision {
 /**
  * Return the legal action mask for the Core-only pass-ordering experiment.
  *
- * Fusion is ineligible while the circuit contains a unitary on more than two
- * qubits. Other actions are eligible unless suppressed by the caller.
+ * Optimization actions are available in every phase. Placement and routing can
+ * only run before mapping, target synthesis can only run while non-native
+ * operations remain, and termination requires full target conformance.
  */
 [[nodiscard]] ActionMask legalActions(const CompilerState& state,
                                       const ActionMask& suppressed);

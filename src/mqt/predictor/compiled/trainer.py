@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 
+from .onnx_policy import TanhMlpPolicy
 from .policy import ACTION_NAMES, FEATURE_NAMES, LinearPolicy
 
 if TYPE_CHECKING:
@@ -51,9 +52,6 @@ class TrainingExample:
         if len(self.legal) != len(ACTION_NAMES) or not any(self.legal):
             msg = f"training mask must enable at least one of {len(ACTION_NAMES)} actions"
             raise ValueError(msg)
-        if not self.legal[-1]:
-            msg = "training mask must keep terminate legal"
-            raise ValueError(msg)
         if not 0 <= self.action < len(ACTION_NAMES) or not self.legal[self.action]:
             msg = "training action must be enabled by its mask"
             raise ValueError(msg)
@@ -71,16 +69,28 @@ class TrainingResult:
     accuracy: float
 
 
-def extract_maskable_ppo_policy(model: MaskablePPO) -> LinearPolicy:
-    """Extract the direct linear actor from a MaskablePPO model."""
+def extract_maskable_ppo_policy(model: MaskablePPO) -> LinearPolicy | TanhMlpPolicy:
+    """Extract a direct-linear or one-hidden-layer Tanh PPO actor."""
     policy = model.policy
-    if len(policy.mlp_extractor.policy_net) != 0:
-        msg = "MaskablePPO policy actor must not contain hidden layers"
-        raise ValueError(msg)
+    policy_net = policy.mlp_extractor.policy_net
     action_net = policy.action_net
-    weights = cast("Tensor", action_net.weight).detach().cpu().numpy()
-    bias = cast("Tensor", action_net.bias).detach().cpu().numpy()
-    return LinearPolicy(weights=np.asarray(weights, dtype=np.float32), bias=np.asarray(bias, dtype=np.float32))
+    output_weights = cast("Tensor", action_net.weight).detach().cpu().numpy()
+    output_bias = cast("Tensor", action_net.bias).detach().cpu().numpy()
+    if len(policy_net) == 0:
+        return LinearPolicy(
+            weights=np.asarray(output_weights, dtype=np.float32),
+            bias=np.asarray(output_bias, dtype=np.float32),
+        )
+    if len(policy_net) != 2 or type(policy_net[0]).__name__ != "Linear" or type(policy_net[1]).__name__ != "Tanh":
+        msg = "MaskablePPO actor must be linear or contain one Tanh hidden layer"
+        raise ValueError(msg)
+    hidden = policy_net[0]
+    return TanhMlpPolicy(
+        hidden_weights=np.asarray(cast("Tensor", hidden.weight).detach().cpu().numpy(), dtype=np.float32),
+        hidden_bias=np.asarray(cast("Tensor", hidden.bias).detach().cpu().numpy(), dtype=np.float32),
+        output_weights=np.asarray(output_weights, dtype=np.float32),
+        output_bias=np.asarray(output_bias, dtype=np.float32),
+    )
 
 
 def train_maskable_ppo(
@@ -88,9 +98,23 @@ def train_maskable_ppo(
     *,
     timesteps: int = 2,
     seed: int = 7,
-) -> LinearPolicy:
-    """Train the smallest MaskablePPO actor that matches the compiled ABI."""
-    if timesteps < 2 or seed < 0:
+    hidden_dim: int = 16,
+    rollout_steps: int | None = None,
+    batch_size: int = 64,
+    n_epochs: int = 1,
+    learning_rate: float = 3e-4,
+) -> LinearPolicy | TanhMlpPolicy:
+    """Train a compact MaskablePPO actor matching the compiled ONNX ABI."""
+    if (
+        timesteps < 2
+        or seed < 0
+        or not 0 <= hidden_dim <= 64
+        or (rollout_steps is not None and not 2 <= rollout_steps <= timesteps)
+        or batch_size < 2
+        or n_epochs <= 0
+        or not np.isfinite(learning_rate)
+        or learning_rate <= 0
+    ):
         msg = "MaskablePPO training parameters are invalid"
         raise ValueError(msg)
     if env.observation_space.shape != (len(FEATURE_NAMES),) or getattr(env.action_space, "n", None) != len(
@@ -101,14 +125,20 @@ def train_maskable_ppo(
 
     from sb3_contrib import MaskablePPO  # ruff: ignore[import-outside-top-level]
 
+    effective_rollout_steps = timesteps if rollout_steps is None else rollout_steps
+    effective_batch_size = min(batch_size, effective_rollout_steps)
     model = MaskablePPO(
         "MlpPolicy",
         env,
-        n_steps=timesteps,
-        batch_size=timesteps,
-        n_epochs=1,
+        n_steps=effective_rollout_steps,
+        batch_size=effective_batch_size,
+        n_epochs=n_epochs,
         gamma=0.98,
-        policy_kwargs={"net_arch": {"pi": [], "vf": []}},
+        learning_rate=learning_rate,
+        policy_kwargs={
+            "net_arch": {"pi": [] if hidden_dim == 0 else [hidden_dim], "vf": []},
+            "ortho_init": False,
+        },
         verbose=0,
         seed=seed,
         device="cpu",

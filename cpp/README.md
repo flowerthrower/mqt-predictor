@@ -1,245 +1,194 @@
-# Compiled MLIR predictor experiment
+# Compiled Core pass-ordering experiment
 
-This directory contains a compiled C++ policy experiment. It runs as an MLIR
-`ModuleOp` pass and uses MQT Core's native optimization, mapping, routing,
-synthesis, and verification passes. The default build has no ML inference
-runtime; an optional ONNX Runtime backend accepts any actor with the fixed
-feature/logit tensor interface. The bundled exporter starts with a linear actor
-for the smallest end-to-end experiment.
+This directory contains an experimental MLIR `ModuleOp` pass that orders only
+MQT Core QCO passes. Python is used to train and export an actor. Deployment is
+C++ only: ONNX Runtime evaluates the actor inside the MLIR pass, and MQT Core
+executes every selected transformation. No Qiskit, TKET, BQSKit, or other SDK
+compiler pass is a policy action.
 
-The driver supports both its original hand-written bootstrap actor and a
-target-specific linear model exported by the matching Python trainer. The
-artifact is validated against its feature/action order, parameter checksum,
-target fingerprint, and exact MQT Core revision before inference. It is not
-compatible with existing Predictor v3 models.
+The current Python environment and compiled runtime use this compatibility
+identity:
 
-## Build
+```text
+3036c91238449452d53cb6aca5d02ce503d8f1ac+patch.e761b935ad001c122eb34044da3468844a7caf2d35edaff41e63492fcd665a01
+```
 
-The experiment requires CMake 3.24+, Ninja, and LLVM/MLIR 22.1+ (tested with
-22.1.8). MQT Core's installed package does not yet export its MLIR targets, so
-this build embeds Core main revision `27980b4ec5b2ef6a8ada3629944238f5f66700c2`.
-Set `MQT_CORE_SOURCE_DIR` to reuse a local checkout; otherwise CMake downloads
-that revision. The build applies `patches/mqt-core-ready-block-order.patch` to
-downloaded sources. A local override must be a Git checkout at the exact
-revision with that patch already applied.
+The first component is the exact MQT Core revision. The second is the SHA-256 of
+`patches/mqt-core-predictor-stages.patch`, which exposes the staged target
+operations and orders mapping-ready operations by MLIR block order.
+
+## Runtime design
+
+```text
+Python: CorePredictorEnv -> MaskablePPO -> 13x16x6 Tanh actor -> ONNX
+                                                             |
+C++: MLIR pass -> features and legal mask -> ONNX Runtime ----+
+       |                                      |
+       +------ persistent Core QCO program <--+
+```
+
+`CorePredictorEnv` converts input circuits to QCO once and keeps one QCO program
+alive for the complete episode. C++ does the same inside the pass. Cleanup and
+multi-control decomposition are preparation steps outside the policy. Mapping,
+routing, and synthesis state is derived from the selected stages rather than
+from a Python round trip.
+
+The staged completion path is:
+
+1. `place-and-route` maps and routes the persistent QCO program;
+2. `synthesize-for-target` lowers it to the target-native operation set; and
+3. `terminate` only runs Core's target-conformance verifier.
+
+Optimization passes may run more than once, including after mapping or
+synthesis. A changed optimization invalidates synthesized state. Exact no-op
+retries are masked for the current QCO state. The budget mask reserves the last
+required mapping and synthesis slots.
+
+Python may use Qiskit circuit objects for input conversion and reward metrics,
+but the transition selected by the agent is always one of the Core actions
+below. The deployed C++ path does not require Python or Qiskit.
+
+## Policy ABI
+
+Schema `mqt-predictor-core-stages/1` has 13 ordered, clamped float32 features:
+
+1. logical qubits relative to target width;
+2. normalized logarithmic depth;
+3. two-qubit interaction density;
+4. normalized two-qubit critical depth;
+5. two-qubit-gate ratio;
+6. normalized parallelism;
+7. qubit liveness;
+8. transformation step divided by 100; and
+9. through 13. execution counts divided by 100 for each transformation action in
+   the order below.
+
+The six ordered actions are:
+
+1. `merge-single-qubit-rotation-gates`;
+2. `fuse-single-qubit-unitary-runs` with basis `u`;
+3. `fuse-two-qubit-gates`;
+4. `place-and-route`;
+5. `synthesize-for-target`; and
+6. `terminate`.
+
+The hard limit is 100 transformation actions per compilation. Termination does
+not consume a transformation slot. The current deployment recommendation is
+`--max-steps=16`; see the measured budget comparison below.
+
+The selected actor has one 16-unit Tanh hidden layer and 326 float32 parameters.
+The C++ loader checks the ONNX schema, feature and action order, target
+fingerprint, complete Core compatibility identity, required provenance, runtime
+tensor types and shapes, and finite logits. It logs a SHA-256 ID of the complete
+ONNX file. It does not independently checksum the ONNX initializer tensors, so
+that artifact ID must not be described as a separately verified parameter
+checksum.
+
+## Build and run
+
+The experiment requires CMake 3.24+, Ninja, LLVM/MLIR 22.1+, C++20, and Python
+3.11+ for the optional training dependencies. It has been tested with LLVM/MLIR
+22.1.8.
+
+With no `MQT_CORE_SOURCE_DIR`, CMake fetches the exact Core revision and applies
+the patch. To reuse a checkout, put it at that revision and apply the patch
+before configuring:
 
 ```console
 export LLVM_DIR=/path/to/llvm/lib/cmake/llvm
 export MLIR_DIR=/path/to/llvm/lib/cmake/mlir
-export MQT_CORE_SOURCE_DIR=/path/to/mqt-core  # optional local override
+export MQT_CORE_SOURCE_DIR=/path/to/mqt-core
 
-cmake --preset debug
-cmake --build --preset debug
-ctest --preset debug
+git -C "$MQT_CORE_SOURCE_DIR" apply \
+  "$PWD/cpp/patches/mqt-core-predictor-stages.patch"
 ```
 
-To enable ONNX inference, point CMake at an ONNX Runtime C/C++ SDK. It remains a
-Predictor-only dependency and is not linked into MQT Core.
+Build with an ONNX Runtime C/C++ SDK and run the complete C++ test set:
 
 ```console
-cmake --preset debug -DMQT_PREDICTOR_ENABLE_ONNX=ON \
+cmake --preset release -DMQT_PREDICTOR_ENABLE_ONNX=ON \
   -DONNXRUNTIME_ROOT=/path/to/onnxruntime-sdk
-cmake --build --preset debug
+cmake --build --preset release
+ctest --preset release
 ```
 
-Compiler caching is disabled in the presets for reproducibility; pass
-`-DENABLE_CACHE=ON` to `cmake` to opt in with a working cache installation.
-
-## Run
+Run deterministic argmax inference on the Core-hosted IQM Garnet target:
 
 ```console
-build/debug/cpp/mqt-predictor-cc --trace \
-  --target=cpp/test/Inputs/line-4-target.json \
-  --model=cpp/test/Inputs/line-4-policy.json \
-  -o build/debug/predicted.mlir cpp/test/Inputs/bell.qasm
+build/release/cpp/mqt-predictor-cc --policy=model --trace --max-steps=16 \
+  --qdmi-device=mqt.sc.iqm.garnet \
+  --model=cpp/models/iqm-garnet-ppo-tanh16.onnx \
+  -o build/release/predicted.mlir input.qasm
 ```
 
-`--model` accepts the native JSON actor or an `.onnx` actor when ONNX support is
-enabled. Use `--policy=bootstrap` for the hand-written actor, `--policy=core`
-for Core's canonical target pipeline, or `--policy=exhaustive` for a
-training-free search. `--model` implies `--policy=model`. The driver accepts
-OpenQASM 3 or QCO MLIR and emits QCO MLIR.
+The driver accepts OpenQASM 3 or QCO MLIR and emits QCO MLIR. The model is
+target-specific; a metadata or target mismatch is a configuration error.
 
-The exhaustive mode evaluates Core's canonical pipeline and all 16 ordered
-subsets of the three native optimization actions before the same mapping and
-target-finalization stages. It selects lexicographically by two-qubit critical
-depth, two-qubit gate count, total depth, and total gate count. `--trace`
-reports every candidate, its compile time, and the selected schedule.
-
-The experiment sorts each mapping ready set by MLIR block order before
-evaluating it. The change is carried as a patch because the pinned upstream Core
-revision does not contain it.
-
-The Core-hosted IQM snapshots are available through their stable QDMI IDs:
+For Python-side training and ABI tests, install the opt-in group and replace its
+clean Core wheel with bindings built from the same patched checkout:
 
 ```console
-build/release/cpp/mqt-predictor-cc --policy=exhaustive --trace \
-  --qdmi-device=mqt.sc.iqm.garnet input.qasm
-build/release/cpp/mqt-predictor-cc --policy=exhaustive --trace \
-  --qdmi-device=mqt.sc.iqm.emerald input.qasm
-```
-
-## Minimal trainer/exporter
-
-The checked-in dataset contains 20 synthetic imitation examples and only 32
-full-batch updates. It exists solely to smoke-test serialization, training,
-export, and loading; its samples are not compiler trajectories or a quality
-result.
-
-```console
-uv run python -m mqt.predictor.compiled \
-  --dataset cpp/test/Inputs/line-4-training.json \
-  --target cpp/test/Inputs/line-4-target.json \
-  --output cpp/test/Inputs/line-4-policy.json \
-  --core-revision 27980b4ec5b2ef6a8ada3629944238f5f66700c2 \
-  --objective "synthetic serialization and imitation-training smoke" \
-  --epochs 32
-```
-
-The exporter records the current Git revision (with `+dirty` when applicable)
-unless `--source-revision` is provided.
-
-## Native pass-ordering RL experiment
-
-The native trainer uses masked episodic REINFORCE. Action sampling and every
-pass transition happen in the compiled MLIR driver; Python only updates and
-exports the 65 parameters of the linear actor between complete compilations.
-Deterministic deployment remains C++-only.
-
-```console
-uv run python -m mqt.predictor.compiled.native_rl bench/*.qasm \
-  --binary build/release/cpp/mqt-predictor-cc \
-  --qdmi-device mqt.sc.iqm.garnet \
-  --max-passes 100 --updates 8 --episodes-per-circuit 2 \
-  --output build/release/native-policy.json \
-  --report build/release/native-policy-report.json
-```
-
-`--max-passes` limits executed transformations; the terminate decision does not
-consume that budget. The reward compares two-qubit depth, two-qubit gates, total
-depth, and total gates with Core's canonical pipeline and charges a small cost
-per pass. The report preserves complete best schedules, repeated-pass counts,
-deterministic evaluation, and the best exhaustive ordering in which each of the
-three optimization passes is used at most once. Circuits without a valid Core
-baseline are listed under `excluded` and are not trained on.
-
-## Python/Core training environment
-
-`CorePredictorEnv` keeps one `QCOProgram` alive for the complete episode. Qiskit
-is used only at reset and on copied snapshots for observations and reward; every
-chosen pass mutates a transactional QCO copy. This avoids losing MLIR mapping
-state in Qiskit round trips. Python and C++ both run Core's QCO cleanup pipeline
-once before the first observation so Qiskit and OpenQASM inputs have the same
-policy state.
-
-This first profile selects four pre-target actions exposed by Core: merge
-rotations, fuse one-qubit runs in the `u` basis, decompose multi-controlled
-gates, and lift Hadamards. The fifth action terminates and invokes Core's
-canonical `compile_for_target()` pipeline. The qubit-reuse pipeline is excluded
-because it can introduce quantum control flow that the straight-line feature
-analyzer cannot represent. Core main does not yet expose fuse-two-qubit,
-place-and-route, or target-native synthesis as separate Python actions. The
-environment therefore has a distinct 12-feature ABI and permits exactly 100
-transformation actions before only termination remains legal. It does not
-register any Qiskit, TKET, BQSKit, or other SDK compilation action; Qiskit is
-only the circuit conversion and metric view.
-
-Install the opt-in experiment dependencies with `uv sync --group compiled`.
-Before collecting training rewards, replace the clean Core wheel with bindings
-built from the patched checkout so Python training and C++ inference use the
-same deterministic routing implementation:
-
-```console
+uv sync --group compiled
 CMAKE_ARGS="-DENABLE_CACHE=OFF -DMLIR_DIR=$MLIR_DIR -DLLVM_DIR=$LLVM_DIR" \
   uv pip install --reinstall --no-deps "$MQT_CORE_SOURCE_DIR"
+uv run pytest tests/compilation/test_core_env.py \
+  tests/compilation/test_compiled_policy.py \
+  tests/compilation/test_onnx_policy.py
 ```
 
-The smallest real RL trial uses the existing MaskablePPO dependency with a
-linear actor and one update. In this precise pseudocode, `circuits` is a
-non-empty sequence of Qiskit circuits, `target` is the matching Core
-`CompilerTarget`, and `target_fingerprint` is the fingerprint reported by the
-compiled driver for that target:
+These compiled-dependency Python tests and the CMake/CTest build are optional
+local validation. The repository's normal Nox/CI test sessions neither install
+the `compiled` dependency group nor configure this C++ experiment.
 
-```python
-from pathlib import Path
+## Selected actor and measured result
 
-from mqt.predictor.compiled import CorePredictorEnv, export_onnx_policy, train_maskable_ppo
+The retained actor was trained with MaskablePPO for 2,048 timesteps using a
+13-to-16-to-6 Tanh policy, rollout size 64, four epochs, `gamma=0.98`, learning
+rate `3e-4`, and seed 19. Its weights were trained against older Core revision
+`27980b4ec5b2ef6a8ada3629944238f5f66700c2` with the same patch digest. They were
+re-exported for, and revalidated against, the current compatibility identity
+above. A minimal retraining run on the current pin scored worse on its
+validation circuits, so it did not replace the retained weights.
 
-env = CorePredictorEnv(circuits, target, max_passes=100)
-policy = train_maskable_ppo(env, timesteps=8, seed=7)
-export_onnx_policy(
-    Path("policy.onnx"),
-    policy,
-    target_fingerprint_override=target_fingerprint,
-    core_revision="27980b4ec5b2ef6a8ada3629944238f5f66700c2",
-    training_algorithm="MaskablePPO linear actor smoke",
-    objective="Core-relative structural cost",
-)
-```
+The broad revalidation used the Core-hosted 20-qubit IQM Garnet target and 48
+MQT Bench circuits selected from the prior Garnet-supported screen. `bv-16`
+failed for every method during conversion with
+`QC measurement destination must follow the measurement in the same block`; the
+table therefore reports the 47 paired supported circuits. Scores are weighted
+structural improvement relative to Core's canonical target pipeline, so zero is
+a tie with Core and larger is better.
 
-Eight timesteps prove training, export, and compiled inference; they are not
-enough to claim compilation-quality improvement. Richer ONNX actors can reuse
-the same C++ feature/logit interface.
+| Method                      | Mean score |    Median | Minimum | Positive / tie / negative | Mean passes |  Mean time |
+| --------------------------- | ---------: | --------: | ------: | ------------------------: | ----------: | ---------: |
+| Core canonical baseline     |          0 |         0 |       0 |                0 / 47 / 0 |           0 | 0.102229 s |
+| Fixed five-pass schedule    |  0.0323792 | 0.0304044 |       0 |                40 / 7 / 0 |           5 | 0.412701 s |
+| Selected Tanh actor, cap 16 |  0.1249747 | 0.1213732 |       0 |                43 / 4 / 0 |     15.2766 | 1.074931 s |
 
-This experiment requires Python 3.11 or newer because the pinned Core-main
-bindings do not support Python 3.10.
+Against the fixed schedule, the actor was better on 38 circuits, tied on seven,
+and worse on two; its mean score delta was `+0.0925955`. Against canonical Core
+it had no negative result on the 47 supported circuits.
 
-Fusion uses the shared `u` basis. It is masked until any unitary acting on more
-than two qubits has been decomposed because Core's QCO-to-Qiskit exporter cannot
-represent the resulting multiply controlled `u` operation. Any failed pass or
-snapshot conversion is rolled back transactionally.
+In the same-actor budget study, cap 100 obtained mean score `0.1249807` with
+93.8511 mean passes and 5.27559 s mean time. Cap 16 retained 99.9952% of that
+mean score while executing 83.72% fewer passes. Times are local wall-clock
+measurements, not portable performance guarantees.
 
-## Experimental policy contract
+The broad corpus was untouched when first evaluated, but its results later
+influenced the decision to retain this actor and deploy it with cap 16 instead
+of the separately trained cap-16 actor. It is therefore engineering selection
+data, not an untouched final test set. These results show a promising local
+experiment, not a generalization claim.
 
-Schema `mqt-predictor-core-passes/1` contains this ordered, clamped 12-float
-vector:
+## Input and fallback boundary
 
-1. logical qubits divided by target width;
-2. `log1p(depth) / log1p(1,000,000)`;
-3. unique two-qubit interaction density;
-4. two-qubit critical-path length divided by the number of two-qubit gates;
-5. two-qubit gates divided by all unitary gates;
-6. normalized gates-per-depth parallelism;
-7. active qubit-operation slots divided by qubits times depth;
-8. executed transformation steps divided by 100; and
-9. through 12. each Core transformation's execution count divided by 100.
+Model inference starts only from a fully unmapped, straight-line QCO program.
+The current analyzer supports scalar qubits and statically indexed,
+one-dimensional QTensor registers. An initially mapped or partially mapped
+program, dynamic tensor indexing, quantum control flow, an invalid action
+result, or unsupported structure rejects the model attempt, restores the
+original module, and attempts Core's canonical target pipeline. Compilation can
+still fail if that pipeline also rejects the input.
 
-The ordered actions are merge rotations, fuse single-qubit runs, decompose
-multi-controlled gates, lift Hadamards, and terminate. A no-op transformation is
-suppressed for the unchanged circuit, and only termination remains legal after
-100 transformations. Termination invokes Core's canonical target pipeline.
-`--trace` prints the ordered feature values and every decision. No Qiskit, TKET,
-BQSKit, or other SDK compiler action is represented.
-
-The native artifact schema is `mqt-predictor-native-policy/1`; it contains an
-action-major float32 linear layer with 12 inputs and five outputs. The optional
-`mqt-predictor-onnx-policy/1` schema accepts a fixed float32 `features[1,12]`
-input and returns raw `logits[1,5]`. In either case C++ applies the Core
-legality mask and deterministic argmax.
-
-## Compiler target JSON
-
-Target schema `mqt-compiler-target/1` contains a name, ordered integer site IDs,
-an optional undirected coupling list, and native operation signatures. See
-`test/Inputs/line-4-target.json`. The loader constructs Core's validated
-`CompilerTarget` and derives a deterministic fingerprint from its normalized
-topology and operation set.
-
-This first target schema intentionally excludes calibration, durations,
-site-specific gate support, and live QDMI device discovery. Those need a reward
-contract before they can contribute meaningfully to training.
-
-## Experiment boundary
-
-The native path currently supports straight-line scalar-QCO entry points and
-statically indexed, straight-line one-dimensional QTensor registers. Each
-completed result is checked with Core's target-conformance verifier. Direct MLIR
-inputs are also checked for exactly-once linear-qubit use; static-site aliases
-are rejected conservatively across the whole module.
-
-Dynamic tensor indexing, quantum control flow, failed actions, and exhausted
-transformation budgets restore the original module and use Core's canonical
-pipeline. The built-in line target remains available through `--target-qubits`
-for the bootstrap and Core policies. Model artifacts are deliberately
-target-specific; a target, Core, schema, ordering, dimension, or checksum
-mismatch is a hard configuration error rather than a silent fallback.
+Every successful model result is checked with Core's target-conformance verifier
+and with the experiment's static-site and linear-qubit checks before it is
+returned.

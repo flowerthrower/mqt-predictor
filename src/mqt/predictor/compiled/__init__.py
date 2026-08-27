@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 from .core_env import CorePredictorEnv
-from .onnx_policy import ONNX_POLICY_SCHEMA, OnnxPolicy, export_onnx_policy, load_onnx_policy
+from .onnx_policy import ONNX_POLICY_SCHEMA, OnnxPolicy, TanhMlpPolicy, export_onnx_policy, load_onnx_policy
 from .policy import ACTION_NAMES, FEATURE_NAMES, LinearPolicy, export_linear_policy, target_fingerprint
 from .trainer import (
     TrainingExample,
@@ -29,6 +29,7 @@ __all__ = [
     "CorePredictorEnv",
     "LinearPolicy",
     "OnnxPolicy",
+    "TanhMlpPolicy",
     "TrainingExample",
     "TrainingResult",
     "export_linear_policy",

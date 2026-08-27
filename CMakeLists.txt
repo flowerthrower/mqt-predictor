@@ -35,13 +35,17 @@ set(CMAKE_CXX_EXTENSIONS ON)
 include(FetchContent)
 
 set(MQT_CORE_REVISION
-    "27980b4ec5b2ef6a8ada3629944238f5f66700c2"
+    "3036c91238449452d53cb6aca5d02ce503d8f1ac"
     CACHE INTERNAL "MQT Core revision used by the experimental MLIR predictor" FORCE)
 set(MQT_CORE_SOURCE_DIR
     "$ENV{MQT_CORE_SOURCE_DIR}"
     CACHE PATH "Optional local MQT Core source directory")
-set(MQT_CORE_MAPPING_PATCH
-    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/patches/mqt-core-ready-block-order.patch")
+set(MQT_CORE_PREDICTOR_PATCH
+    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/patches/mqt-core-predictor-stages.patch")
+file(SHA256 "${MQT_CORE_PREDICTOR_PATCH}" MQT_CORE_PREDICTOR_PATCH_SHA256)
+set(MQT_CORE_COMPATIBILITY_ID
+    "${MQT_CORE_REVISION}+patch.${MQT_CORE_PREDICTOR_PATCH_SHA256}"
+    CACHE INTERNAL "MQT Core and Predictor patch compatibility identity" FORCE)
 
 set(BUILD_MQT_CORE_TESTS
     OFF
@@ -85,13 +89,13 @@ if(MQT_CORE_SOURCE_DIR)
   endif()
   execute_process(
     COMMAND "${GIT_EXECUTABLE}" -C "${MQT_CORE_SOURCE_DIR}" apply --reverse
-            --check "${MQT_CORE_MAPPING_PATCH}"
+            --check "${MQT_CORE_PREDICTOR_PATCH}"
     RESULT_VARIABLE MQT_CORE_PATCH_RESULT
     ERROR_QUIET)
   if(NOT MQT_CORE_PATCH_RESULT EQUAL 0)
     message(
       FATAL_ERROR
-        "MQT_CORE_SOURCE_DIR must include ${MQT_CORE_MAPPING_PATCH}; apply it before configuring")
+        "MQT_CORE_SOURCE_DIR must include ${MQT_CORE_PREDICTOR_PATCH}; apply it before configuring")
   endif()
   unset(MQT_CORE_GIT_RESULT)
   unset(MQT_CORE_PATCH_RESULT)
@@ -103,7 +107,7 @@ else()
     mqt-core
     GIT_REPOSITORY https://github.com/munich-quantum-toolkit/core.git
     GIT_TAG ${MQT_CORE_REVISION}
-    PATCH_COMMAND "${GIT_EXECUTABLE}" apply "${MQT_CORE_MAPPING_PATCH}")
+    PATCH_COMMAND "${GIT_EXECUTABLE}" apply "${MQT_CORE_PREDICTOR_PATCH}")
 endif()
 
 FetchContent_MakeAvailable(mqt-core)

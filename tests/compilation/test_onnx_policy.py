@@ -20,6 +20,7 @@ from mqt.predictor.compiled import (
     FEATURE_NAMES,
     ONNX_POLICY_SCHEMA,
     LinearPolicy,
+    TanhMlpPolicy,
     export_onnx_policy,
     load_onnx_policy,
     onnx_policy,
@@ -48,10 +49,29 @@ def _export(path: Path) -> LinearPolicy:
         policy,
         target_fingerprint_override=TARGET_FINGERPRINT,
         core_revision="core-revision",
+        source_revision="source-revision",
         training_algorithm="test-linear",
         objective="raw-logit parity",
     )
     return policy
+
+
+def _mlp_policy() -> TanhMlpPolicy:
+    hidden_weights = np.linspace(
+        -0.4,
+        0.4,
+        16 * len(FEATURE_NAMES),
+        dtype=np.float32,
+    ).reshape(16, len(FEATURE_NAMES))
+    hidden_bias = np.linspace(-0.1, 0.1, 16, dtype=np.float32)
+    output_weights = np.linspace(
+        -0.3,
+        0.3,
+        len(ACTION_NAMES) * 16,
+        dtype=np.float32,
+    ).reshape(len(ACTION_NAMES), 16)
+    output_bias = np.linspace(-0.2, 0.2, len(ACTION_NAMES), dtype=np.float32)
+    return TanhMlpPolicy(hidden_weights, hidden_bias, output_weights, output_bias)
 
 
 def test_onnx_dependency_is_loaded_only_for_export(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -81,6 +101,8 @@ def test_onnx_round_trip_preserves_raw_logits_and_metadata(tmp_path: Path) -> No
         "action_names": ",".join(ACTION_NAMES),
         "target_fingerprint": TARGET_FINGERPRINT,
         "core_revision": "core-revision",
+        "architecture": "linear",
+        "source_revision": "source-revision",
         "training_algorithm": "test-linear",
         "objective": "raw-logit parity",
     }
@@ -94,6 +116,48 @@ def test_onnx_round_trip_preserves_raw_logits_and_metadata(tmp_path: Path) -> No
     ).logits(features.tolist())
 
     np.testing.assert_allclose(actual, expected.astype(np.float32), rtol=1e-6, atol=1e-6)
+
+
+def test_onnx_tanh_actor_round_trip_preserves_raw_logits(tmp_path: Path) -> None:
+    """The richer actor keeps the same fixed compiler tensor interface."""
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxruntime")
+    path = tmp_path / "policy.onnx"
+    policy = _mlp_policy()
+    export_onnx_policy(
+        path,
+        policy,
+        target_fingerprint_override=TARGET_FINGERPRINT,
+        core_revision="core-revision",
+        source_revision="source-revision",
+        training_algorithm="test-tanh-mlp",
+        objective="raw-logit parity",
+    )
+    features = np.linspace(0.0, 1.0, len(FEATURE_NAMES), dtype=np.float32)
+
+    actual = load_onnx_policy(
+        path,
+        expected_target_fingerprint=TARGET_FINGERPRINT,
+        expected_core_revision="core-revision",
+    ).logits(features.tolist())
+
+    np.testing.assert_allclose(actual, policy.logits(features.tolist()), rtol=1e-6, atol=1e-6)
+
+
+def test_tanh_policy_rejects_invalid_features_and_logit_overflow() -> None:
+    """The Python policy view enforces the compiled float32 input/output ABI."""
+    policy = _mlp_policy()
+    with pytest.raises(ValueError, match=r"\[0, 1\]"):
+        policy.logits([2.0] * len(FEATURE_NAMES))
+
+    overflowing = TanhMlpPolicy(
+        np.ones((16, len(FEATURE_NAMES)), dtype=np.float32),
+        np.zeros(16, dtype=np.float32),
+        np.full((len(ACTION_NAMES), 16), np.finfo(np.float32).max, dtype=np.float32),
+        np.zeros(len(ACTION_NAMES), dtype=np.float32),
+    )
+    with pytest.raises(ValueError, match="float32 runtime range"):
+        overflowing.logits([1.0] * len(FEATURE_NAMES))
 
 
 def test_onnx_loader_rejects_incompatible_metadata(tmp_path: Path) -> None:

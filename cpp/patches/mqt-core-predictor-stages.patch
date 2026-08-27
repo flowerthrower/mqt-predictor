@@ -1,0 +1,191 @@
+diff --git a/bindings/mlir/register_mlir.cpp b/bindings/mlir/register_mlir.cpp
+index d66689f..177b938 100644
+--- a/bindings/mlir/register_mlir.cpp
++++ b/bindings/mlir/register_mlir.cpp
+@@ -797,6 +797,10 @@ operations.)pb");
+               &mlir::QCOProgram::fuseSingleQubitUnitaryRuns>::call,
+           nb::kw_only(), "basis"_a = "zyz",
+           "Fuse single-qubit unitary runs into the chosen decomposition basis.")
++      .def("fuse_two_qubit_gates",
++           &BooleanMemberAdapter<&mlir::QCOProgram::fuseTwoQubitGates>::call,
++           "Fuse consecutive two-qubit gates when doing so reduces the gate "
++           "count.")
+       .def("unroll_quantum_loops",
+            &BooleanMemberAdapter<&mlir::QCOProgram::unrollQuantumLoops>::call,
+            nb::kw_only(), "unroll_factor"_a = -1,
+@@ -818,6 +822,19 @@ operations.)pb");
+            "Decompose controlled X/Z/SWAP gates, qco.rccx, and constant-angle "
+            "phase gates that act on at least min_qubits qubits (min_qubits "
+            "must be at least 3; default 3 means wider than two-qubit).")
++      .def("place_and_route",
++           &BooleanMemberAdapter<&mlir::QCOProgram::placeAndRoute>::call,
++           "target"_a,
++           "Clean up, place this program on, and route it for the target.")
++      .def("synthesize_for_target",
++           &BooleanMemberAdapter<&mlir::QCOProgram::synthesizeForTarget>::call,
++           "target"_a,
++           "Clean up and synthesize this program to the target's native "
++           "operations.")
++      .def("verify_target_conformance",
++           &BooleanMemberAdapter<
++               &mlir::QCOProgram::verifyTargetConformance>::call,
++           "target"_a, "Verify that this program conforms to the target.")
+       .def("compile_for_target",
+            &BooleanMemberAdapter<&mlir::QCOProgram::compileForTarget>::call,
+            "target"_a, nb::kw_only(), "enable_timing"_a = false,
+diff --git a/mlir/include/mlir/Compiler/Programs.h b/mlir/include/mlir/Compiler/Programs.h
+index 8b5f725..c621d4c 100644
+--- a/mlir/include/mlir/Compiler/Programs.h
++++ b/mlir/include/mlir/Compiler/Programs.h
+@@ -256,6 +256,9 @@ public:
+   /// Fuse single-qubit unitary runs into the selected Euler basis.
+   [[nodiscard]] bool fuseSingleQubitUnitaryRuns(std::string_view basis = "zyz");
+
++  /// Fuse consecutive two-qubit gates when doing so reduces the gate count.
++  [[nodiscard]] bool fuseTwoQubitGates();
++
+   /// Unroll loops containing quantum operations.
+   [[nodiscard]] bool unrollQuantumLoops(int64_t factor = -1);
+
+@@ -273,6 +276,15 @@ public:
+   /// least 3; default 3 means wider than two-qubit).
+   [[nodiscard]] bool decomposeMultiControlled(uint64_t minQubits = 3);
+
++  /// Clean up, place this program on, and route it for a target.
++  [[nodiscard]] bool placeAndRoute(const CompilerTarget& target);
++
++  /// Clean up and synthesize this program to a target's native operations.
++  [[nodiscard]] bool synthesizeForTarget(const CompilerTarget& target);
++
++  /// Verify that this program conforms to a target.
++  [[nodiscard]] bool verifyTargetConformance(const CompilerTarget& target);
++
+   /// Compile this program for a target in place.
+   ///
+   /// Do not rely on the program contents if compilation fails.
+diff --git a/mlir/lib/Compiler/Programs.cpp b/mlir/lib/Compiler/Programs.cpp
+index ca201c3..364f7c8 100644
+--- a/mlir/lib/Compiler/Programs.cpp
++++ b/mlir/lib/Compiler/Programs.cpp
+@@ -27,6 +27,7 @@
+ #include "mlir/Dialect/QC/Translation/TranslateQASM3ToQC.h"
+ #include "mlir/Dialect/QC/Translation/TranslateQCToOpenQASM3.h"
+ #include "mlir/Dialect/QCO/IR/QCODialect.h"
++#include "mlir/Dialect/QCO/Transforms/Mapping/Mapping.h"
+ #include "mlir/Dialect/QCO/Transforms/Passes.h"
+ #include "mlir/Dialect/QIR/Utils/QIRUtils.h"
+ #include "mlir/Dialect/QTensor/IR/QTensorDialect.h"
+@@ -67,6 +68,7 @@
+ #include <mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h>
+ #include <mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h>
+ #include <mlir/Target/LLVMIR/ModuleTranslation.h>
++#include <mlir/Transforms/Passes.h>
+
+ #include <cassert>
+ #include <cstddef>
+@@ -459,6 +461,13 @@ bool QCOProgram::fuseSingleQubitUnitaryRuns(const std::string_view basis) {
+       "failed to fuse single-qubit unitary runs"));
+ }
+
++bool QCOProgram::fuseTwoQubitGates() {
++  return succeeded(runPasses(
++      mod(),
++      [](OpPassManager& pm) { pm.addPass(qco::createFuseTwoQubitGates()); },
++      "failed to fuse two-qubit gates"));
++}
++
+ bool QCOProgram::unrollQuantumLoops(const int64_t factor) {
+   qco::QuantumLoopUnrollOptions options;
+   options.unrollFactor = factor;
+@@ -498,6 +507,37 @@ bool QCOProgram::decomposeMultiControlled(const uint64_t minQubits) {
+       "failed to decompose multi-controlled gates"));
+ }
+
++bool QCOProgram::placeAndRoute(const CompilerTarget& target) {
++  return succeeded(runPasses(
++      mod(),
++      [&target](OpPassManager& pm) {
++        populateQCOCleanupPipeline(pm);
++        pm.addPass(qco::createMappingPass(target, qco::MappingPassOptions{}));
++      },
++      "failed to place and route the QCO program"));
++}
++
++bool QCOProgram::synthesizeForTarget(const CompilerTarget& target) {
++  return succeeded(runPasses(
++      mod(),
++      [&target](OpPassManager& pm) {
++        populateQCOCleanupPipeline(pm);
++        pm.addPass(qco::createTargetNativeSynthesis(target));
++        pm.addPass(createCSEPass());
++        pm.addPass(createRemoveDeadValuesPass());
++      },
++      "failed to synthesize the QCO program for the target"));
++}
++
++bool QCOProgram::verifyTargetConformance(const CompilerTarget& target) {
++  return succeeded(runPasses(
++      mod(),
++      [&target](OpPassManager& pm) {
++        pm.addPass(qco::createVerifyTargetConformance(target));
++      },
++      "the QCO program does not conform to the target"));
++}
++
+ bool QCOProgram::compileForTarget(const CompilerTarget& target,
+                                   const bool enableTiming,
+                                   const bool enableStatistics) {
+diff --git a/mlir/lib/Dialect/QCO/Transforms/Mapping/Mapping.cpp b/mlir/lib/Dialect/QCO/Transforms/Mapping/Mapping.cpp
+index ef37256..25b6757 100644
+--- a/mlir/lib/Dialect/QCO/Transforms/Mapping/Mapping.cpp
++++ b/mlir/lib/Dialect/QCO/Transforms/Mapping/Mapping.cpp
+@@ -1066,7 +1066,18 @@ private:
+             return WalkResult::advance();
+           }
+
+-          for (const auto& [op, indices] : ready) {
++          SmallVector<Operation*> orderedOps;
++          orderedOps.reserve(ready.size());
++          for (Operation* op : ready.keys()) {
++            orderedOps.emplace_back(op);
++          }
++          llvm::sort(orderedOps, [](Operation* lhs, Operation* rhs) {
++            assert(lhs->getBlock() == rhs->getBlock());
++            return lhs->isBeforeInBlock(rhs);
++          });
++
++          for (Operation* op : orderedOps) {
++            const auto& indices = ready.find(op)->second;
+             if (isa<UnitaryOpInterface>(op)) {
+               const auto i0 = indices[0];
+               const auto i1 = indices[1];
+diff --git a/python/mqt/core/mlir.pyi b/python/mqt/core/mlir.pyi
+index cd6e768..ce358ca 100644
+--- a/python/mqt/core/mlir.pyi
++++ b/python/mqt/core/mlir.pyi
+@@ -439,6 +439,9 @@ class QCOProgram(Program):
+     def fuse_single_qubit_unitary_runs(self, *, basis: str = "zyz") -> None:
+         """Fuse single-qubit unitary runs into the chosen decomposition basis."""
+
++    def fuse_two_qubit_gates(self) -> None:
++        """Fuse consecutive two-qubit gates when doing so reduces the gate count."""
++
+     def unroll_quantum_loops(self, *, unroll_factor: int = -1) -> None:
+         """Unroll quantum loops, optionally using a maximum unroll factor."""
+
+@@ -454,6 +457,15 @@ class QCOProgram(Program):
+     def decompose_multi_controlled(self, *, min_qubits: int = 3) -> None:
+         """Decompose controlled X/Z/SWAP gates, qco.rccx, and constant-angle phase gates that act on at least min_qubits qubits (min_qubits must be at least 3; default 3 means wider than two-qubit)."""
+
++    def place_and_route(self, target: CompilerTarget) -> None:
++        """Clean up, place this program on, and route it for the target."""
++
++    def synthesize_for_target(self, target: CompilerTarget) -> None:
++        """Clean up and synthesize this program to the target's native operations."""
++
++    def verify_target_conformance(self, target: CompilerTarget) -> None:
++        """Verify that this program conforms to the target."""
++
+     def compile_for_target(
+         self, target: CompilerTarget, *, enable_timing: bool = False, enable_statistics: bool = False
+     ) -> None:

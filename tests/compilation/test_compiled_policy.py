@@ -21,6 +21,8 @@ from gymnasium.spaces import Box, Discrete
 from mqt.predictor.compiled import (
     ACTION_NAMES,
     FEATURE_NAMES,
+    TanhMlpPolicy,
+    TrainingExample,
     fit_linear_policy,
     load_training_dataset,
     target_fingerprint,
@@ -34,9 +36,10 @@ INPUTS = Path(__file__).parents[2] / "cpp" / "test" / "Inputs"
 def test_minimal_training_is_deterministic() -> None:
     """The 32-step smoke training run is reproducible."""
     dataset = json.loads((INPUTS / "line-4-training.json").read_text(encoding="utf-8"))
-    assert dataset["purpose"] == "synthetic serialization and imitation-training smoke; not compiler trajectory data"
+    assert dataset["purpose"] == (
+        "manually curated ABI smoke samples; not a reproducible Core trajectory or performance dataset"
+    )
     examples = load_training_dataset(INPUTS / "line-4-training.json")
-    assert all(example.legal[-1] for example in examples)
     first = fit_linear_policy(examples)
     second = fit_linear_policy(examples)
 
@@ -55,7 +58,20 @@ def test_checked_in_artifact_matches_python_contract() -> None:
     assert artifact["compatibility"]["target_fingerprint"] == target_fingerprint(INPUTS / "line-4-target.json")
     assert artifact["parameters_sha256"] == parameter_checksum(weights, bias)
     assert artifact["training"]["epochs"] == 32
-    assert artifact["training"]["objective"] == "synthetic serialization and imitation-training smoke"
+    assert artifact["training"]["objective"] == (
+        "manually curated ABI smoke samples; not a reproducible Core trajectory or performance dataset"
+    )
+
+
+def test_training_fixture_only_enables_terminate_after_core_stages() -> None:
+    """Recorded terminal masks follow staged target conformance."""
+    dataset = json.loads((INPUTS / "line-4-training.json").read_text(encoding="utf-8"))
+    terminal_samples = [sample for sample in dataset["samples"] if sample["legal"][-1]]
+
+    assert terminal_samples
+    assert all(sample["action"] == "terminate" for sample in terminal_samples)
+    assert all(sample["legal"][3:] == [False, False, True] for sample in terminal_samples)
+    assert all(sample["features"][11] > 0 and sample["features"][12] > 0 for sample in terminal_samples)
 
 
 def test_policy_masks_illegal_actions() -> None:
@@ -64,27 +80,44 @@ def test_policy_masks_illegal_actions() -> None:
     bias = np.arange(len(ACTION_NAMES), dtype=np.float32)
     policy = LinearPolicy(weights, bias)
 
-    selected, logits = policy.select([0.5] * len(FEATURE_NAMES), [True, True, False, False, False])
+    selected, logits = policy.select([0.5] * len(FEATURE_NAMES), [True, True, False, False, False, False])
 
     assert selected == 1
     assert np.isneginf(logits[2:]).all()
 
 
+def test_linear_policy_rejects_runtime_logit_overflow() -> None:
+    """Python rejects parameters that the float32 C++ evaluator cannot score."""
+    weights = np.full(
+        (len(ACTION_NAMES), len(FEATURE_NAMES)),
+        np.finfo(np.float32).max,
+        dtype=np.float32,
+    )
+    policy = LinearPolicy(weights, np.zeros(len(ACTION_NAMES), dtype=np.float32))
+
+    with pytest.raises(ValueError, match="float32 runtime range"):
+        policy.select([1.0] * len(FEATURE_NAMES), [True] * len(ACTION_NAMES))
+
+
 def test_training_rejects_illegal_label() -> None:
     """A training label must be legal in its recorded state."""
-    examples = load_training_dataset(INPUTS / "line-4-training.json")
-    example = examples[0]
-
     with pytest.raises(ValueError, match="enabled"):
-        type(example)(features=example.features, legal=(False, True, False, False, True), action=0)
+        TrainingExample(
+            features=(0.0,) * len(FEATURE_NAMES),
+            legal=(False, True, False, False, False, False),
+            action=0,
+        )
 
 
-def test_training_requires_terminate_to_remain_legal() -> None:
-    """Imitation masks follow the runtime's always-legal terminate contract."""
-    example = load_training_dataset(INPUTS / "line-4-training.json")[0]
+def test_training_accepts_preterminal_stage_mask() -> None:
+    """Imitation data may record states before target conformance."""
+    example = TrainingExample(
+        features=(0.0,) * len(FEATURE_NAMES),
+        legal=(True, True, True, True, True, False),
+        action=0,
+    )
 
-    with pytest.raises(ValueError, match="keep terminate legal"):
-        type(example)(features=example.features, legal=(True, True, True, True, False), action=0)
+    assert example.action == 0
 
 
 @pytest.mark.parametrize("invalid_operation", ["cnot", "U", " cx "])
@@ -150,11 +183,27 @@ class _MinimalMaskedEnv(Env):
         return [True] * len(ACTION_NAMES)
 
 
-def test_maskable_ppo_trains_deployable_linear_actor() -> None:
-    """Minimal PPO training returns the exact compiled actor dimensions."""
+def test_maskable_ppo_trains_deployable_tanh_actor() -> None:
+    """Minimal PPO training returns the fixed compact ONNX actor."""
     policy = train_maskable_ppo(_MinimalMaskedEnv(), timesteps=2, seed=7)
 
+    assert isinstance(policy, TanhMlpPolicy)
+    assert policy.hidden_weights.shape == (16, len(FEATURE_NAMES))
+    assert policy.hidden_bias.shape == (16,)
+    assert policy.output_weights.shape == (len(ACTION_NAMES), 16)
+    assert policy.output_bias.shape == (len(ACTION_NAMES),)
+
+
+def test_maskable_ppo_rejects_rollout_larger_than_training_budget() -> None:
+    """Requested timesteps remain an upper bound on compiler transitions."""
+    with pytest.raises(ValueError, match="parameters are invalid"):
+        train_maskable_ppo(_MinimalMaskedEnv(), timesteps=2, rollout_steps=3)
+
+
+def test_maskable_ppo_retains_linear_actor_ablation() -> None:
+    """The direct-linear actor remains available as an experiment baseline."""
+    policy = train_maskable_ppo(_MinimalMaskedEnv(), timesteps=2, seed=7, hidden_dim=0)
+
+    assert isinstance(policy, LinearPolicy)
     assert policy.weights.shape == (len(ACTION_NAMES), len(FEATURE_NAMES))
     assert policy.bias.shape == (len(ACTION_NAMES),)
-    assert np.isfinite(policy.weights).all()
-    assert np.isfinite(policy.bias).all()

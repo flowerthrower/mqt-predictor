@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
     from numpy.typing import NDArray
 
-OBSERVATION_SCHEMA = "mqt-predictor-core-passes/1"
+OBSERVATION_SCHEMA = "mqt-predictor-core-stages/1"
 NATIVE_POLICY_SCHEMA = "mqt-predictor-native-policy/1"
 COMPILER_TARGET_SCHEMA = "mqt-compiler-target/1"
 TARGET_FINGERPRINT_SCHEMA = b"mqt-compiler-target-fingerprint/1"
@@ -44,14 +44,16 @@ FEATURE_NAMES = (
     "step_fraction",
     "merge-single-qubit-rotation-gates_count",
     "fuse-single-qubit-unitary-runs_count",
-    "decompose-multi-controlled_count",
-    "hadamard-lifting_count",
+    "fuse-two-qubit-gates_count",
+    "place-and-route_count",
+    "synthesize-for-target_count",
 )
 ACTION_NAMES = (
     "merge-single-qubit-rotation-gates",
     "fuse-single-qubit-unitary-runs",
-    "decompose-multi-controlled",
-    "hadamard-lifting",
+    "fuse-two-qubit-gates",
+    "place-and-route",
+    "synthesize-for-target",
     "terminate",
 )
 
@@ -238,6 +240,9 @@ class LinearPolicy:
             msg = f"legal must enable at least one of {len(ACTION_NAMES)} actions"
             raise ValueError(msg)
         logits64 = self.weights.astype(np.float64) @ feature_array.astype(np.float64) + self.bias.astype(np.float64)
+        if not np.isfinite(logits64).all() or np.any(np.abs(logits64) > np.finfo(np.float32).max):
+            msg = "linear policy logits exceed the float32 runtime range"
+            raise ValueError(msg)
         logits = logits64.astype(np.float32)
         logits[~legal_array] = -np.inf
         return int(np.argmax(logits)), logits

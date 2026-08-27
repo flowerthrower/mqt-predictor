@@ -59,7 +59,8 @@ struct WireState {
 } // namespace
 
 ::mlir::FailureOr<CircuitAnalysis>
-analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target) {
+analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target,
+               const std::optional<std::size_t> logicalQubits) {
   using namespace ::mlir;
   using namespace ::mlir::qco;
 
@@ -327,15 +328,19 @@ analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target) {
   if (numQubits == 0) {
     return failure();
   }
+  const auto featureQubits = logicalQubits.value_or(numQubits);
+  if (featureQubits == 0) {
+    return failure();
+  }
 
   const auto mapped = dynamicRoots == 0 && staticRoots == numQubits;
   routed &= mapped;
 
   const auto communication =
-      numQubits > 1 ? (2.0 * static_cast<double>(interactions.size())) /
-                          (static_cast<double>(numQubits) *
-                           static_cast<double>(numQubits - 1))
-                    : 0.0;
+      featureQubits > 1 ? (2.0 * static_cast<double>(interactions.size())) /
+                              (static_cast<double>(featureQubits) *
+                               static_cast<double>(featureQubits - 1))
+                        : 0.0;
   const auto criticalDepth = numTwoQubitGates > 0
                                  ? static_cast<double>(twoQubitCriticalDepth) /
                                        static_cast<double>(numTwoQubitGates)
@@ -345,20 +350,19 @@ analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target) {
                                       static_cast<double>(numGates)
                                 : 0.0;
   const auto parallelism =
-      numQubits > 1 && maxDepth > 0
+      featureQubits > 1 && maxDepth > 0
           ? std::max(((static_cast<double>(numGates) /
                        static_cast<double>(maxDepth)) -
                       1.0) /
-                         static_cast<double>(numQubits - 1),
+                         static_cast<double>(featureQubits - 1),
                      0.0)
           : 0.0;
-  const auto liveness =
-      maxDepth > 0
-          ? static_cast<double>(activity) /
-                (static_cast<double>(numQubits) * static_cast<double>(maxDepth))
-          : 0.0;
+  const auto liveness = maxDepth > 0 ? static_cast<double>(activity) /
+                                           (static_cast<double>(featureQubits) *
+                                            static_cast<double>(maxDepth))
+                                     : 0.0;
   const auto relativeQubits = target.numQubits() > 0
-                                  ? static_cast<double>(numQubits) /
+                                  ? static_cast<double>(featureQubits) /
                                         static_cast<double>(target.numQubits())
                                   : 1.0;
   const auto normalizedDepth = std::log1p(static_cast<double>(maxDepth)) /
@@ -366,7 +370,7 @@ analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target) {
 
   CircuitAnalysis analysis;
   analysis.features = CircuitFeatures{
-      .numQubits = numQubits,
+      .numQubits = featureQubits,
       .depth = maxDepth,
       .twoQubitDepth = twoQubitCriticalDepth,
       .numGates = numGates,
@@ -375,11 +379,11 @@ analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target) {
                  clampUnit(communication), clampUnit(criticalDepth),
                  clampUnit(entanglement), clampUnit(parallelism),
                  clampUnit(liveness)}};
-  analysis.state = CompilerState{
-      .mapped = mapped,
-      .routed = routed,
-      .synthesized = synthesized,
-      .hasWideUnitary = hasWideUnitary};
+  analysis.state = CompilerState{.mapped = mapped,
+                                 .routed = routed,
+                                 .synthesized = synthesized,
+                                 .hasWideUnitary = hasWideUnitary};
+  analysis.fullyUnmapped = dynamicRoots == numQubits;
   return analysis;
 }
 

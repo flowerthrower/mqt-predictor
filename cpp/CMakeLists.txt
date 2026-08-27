@@ -7,7 +7,8 @@
 # Licensed under the MIT License
 
 set(MQT_PREDICTOR_MLIR_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
-add_compile_definitions(MQT_PREDICTOR_CORE_REVISION="${MQT_CORE_REVISION}")
+add_compile_definitions(
+  MQT_PREDICTOR_CORE_REVISION="${MQT_CORE_COMPATIBILITY_ID}")
 
 option(MQT_PREDICTOR_ENABLE_ONNX "Enable ONNX Runtime policy inference" OFF)
 set(ONNXRUNTIME_ROOT
@@ -147,6 +148,21 @@ if(BUILD_TESTING)
         PASS_REGULAR_EXPRESSION
         "policy=model model_schema=mqt-predictor-onnx-policy/1.*action=terminate"
         FAIL_REGULAR_EXPRESSION "falling back;error:")
+
+    add_test(
+      NAME mqt-predictor-iqm-garnet-onnx-model-e2e
+      COMMAND
+        mqt-predictor-cc --trace --max-steps=16
+        --qdmi-device=mqt.sc.iqm.garnet
+        --model=${CMAKE_CURRENT_SOURCE_DIR}/models/iqm-garnet-ppo-tanh16.onnx
+        -o ${CMAKE_CURRENT_BINARY_DIR}/qft-4-iqm-garnet-onnx-model.mlir
+        ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/qft-4.qasm)
+    set_tests_properties(
+      mqt-predictor-iqm-garnet-onnx-model-e2e
+      PROPERTIES
+        PASS_REGULAR_EXPRESSION
+        "policy=model model_schema=mqt-predictor-onnx-policy/1.*action=terminate"
+        FAIL_REGULAR_EXPRESSION "falling back;error:")
   endif()
 
   add_test(
@@ -163,6 +179,33 @@ if(BUILD_TESTING)
                FAIL_REGULAR_EXPRESSION "falling back;error:")
 
   add_test(
+    NAME mqt-predictor-model-native-input-state-e2e
+    COMMAND
+      mqt-predictor-cc --trace
+      --target=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-target.json
+      --model=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-policy.json -o
+      ${CMAKE_CURRENT_BINARY_DIR}/native-line-model.mlir
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/native-line.mlir)
+  set_tests_properties(
+    mqt-predictor-model-native-input-state-e2e
+    PROPERTIES
+      PASS_REGULAR_EXPRESSION
+      "step=0.*mapped=0 routed=0 synthesized=0 legal=111110"
+      FAIL_REGULAR_EXPRESSION "falling back;error:")
+
+  add_test(
+    NAME mqt-predictor-model-rejects-partial-mapping-e2e
+    COMMAND
+      mqt-predictor-cc --trace
+      --target=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-target.json
+      --model=${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/line-4-policy.json -o
+      ${CMAKE_CURRENT_BINARY_DIR}/partial-mapping-model.mlir
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/partially-mapped.mlir)
+  set_tests_properties(
+    mqt-predictor-model-rejects-partial-mapping-e2e
+    PROPERTIES WILL_FAIL TRUE)
+
+  add_test(
     NAME mqt-predictor-bootstrap-e2e
     COMMAND
       mqt-predictor-cc --trace --target-qubits=4 -o
@@ -172,7 +215,7 @@ if(BUILD_TESTING)
     mqt-predictor-bootstrap-e2e
     PROPERTIES
       PASS_REGULAR_EXPRESSION
-      "step=0.*features=\\{relative_qubits=7[.]500000e-01,log_depth=1[.]408497e-01,program_communication=1[.]000000e[+]00,critical_depth=1[.]000000e[+]00,entanglement_ratio=6[.]000000e-01,parallelism=0[.]000000e[+]00,liveness=6[.]111111e-01,step_fraction=0[.]000000e[+]00,merge-single-qubit-rotation-gates_count=0[.]000000e[+]00,fuse-single-qubit-unitary-runs_count=0[.]000000e[+]00,decompose-multi-controlled_count=0[.]000000e[+]00,hadamard-lifting_count=0[.]000000e[+]00\\}"
+      "step=5.*features=\\{relative_qubits=7[.]500000e-01,log_depth=1[.]505150e-01,program_communication=6[.]666667e-01,critical_depth=1[.]000000e[+]00,entanglement_ratio=8[.]000000e-01,parallelism=0[.]000000e[+]00,liveness=5[.]714286e-01,step_fraction=5[.]000000e-02,merge-single-qubit-rotation-gates_count=3[.]000000e-02,fuse-single-qubit-unitary-runs_count=0[.]000000e[+]00,fuse-two-qubit-gates_count=1[.]000000e-02,place-and-route_count=1[.]000000e-02,synthesize-for-target_count=0[.]000000e[+]00\\}"
       FAIL_REGULAR_EXPRESSION "falling back;error:")
 
   add_test(
@@ -195,8 +238,8 @@ if(BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/wide.qasm)
   set_tests_properties(
     mqt-predictor-wide-e2e
-    PROPERTIES PASS_REGULAR_EXPRESSION "schema=mqt-predictor-core-passes/1"
-               FAIL_REGULAR_EXPRESSION "unsupported QCO structure;falling back;error:")
+    PROPERTIES PASS_REGULAR_EXPRESSION "schema=mqt-predictor-core-stages/1"
+               FAIL_REGULAR_EXPRESSION "unsupported QCO structure;error:")
 
   add_test(
     NAME mqt-predictor-qft-feature-e2e
@@ -207,7 +250,7 @@ if(BUILD_TESTING)
   set_tests_properties(
     mqt-predictor-qft-feature-e2e
     PROPERTIES PASS_REGULAR_EXPRESSION "critical_depth=7[.]500000e-01"
-               FAIL_REGULAR_EXPRESSION "unsupported QCO structure;falling back;error:")
+               FAIL_REGULAR_EXPRESSION "unsupported QCO structure;error:")
 
   add_test(
     NAME mqt-predictor-core-e2e
@@ -249,8 +292,21 @@ if(BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/bell.qasm)
   set_tests_properties(
     mqt-predictor-budget-termination-e2e
-    PROPERTIES PASS_REGULAR_EXPRESSION "step=1 action=terminate"
-               FAIL_REGULAR_EXPRESSION "falling back;error:")
+    PROPERTIES
+      PASS_REGULAR_EXPRESSION "falling back to Core's canonical target pipeline"
+      FAIL_REGULAR_EXPRESSION "error:")
+
+  add_test(
+    NAME mqt-predictor-budget-reserves-stages-e2e
+    COMMAND
+      mqt-predictor-cc --trace --max-steps=2 --target-qubits=4 -o
+      ${CMAKE_CURRENT_BINARY_DIR}/bell-budget-stages.mlir
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/bell.qasm)
+  set_tests_properties(
+    mqt-predictor-budget-reserves-stages-e2e
+    PROPERTIES
+      PASS_REGULAR_EXPRESSION "step=2 action=terminate"
+      FAIL_REGULAR_EXPRESSION "falling back;error:")
 
   add_test(
     NAME mqt-predictor-rejects-pass-budget
