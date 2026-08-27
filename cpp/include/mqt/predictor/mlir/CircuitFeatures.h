@@ -16,7 +16,6 @@
 #include <mlir/Support/LLVM.h>
 
 #include <cstddef>
-#include <optional>
 
 namespace mlir {
 class CompilerTarget;
@@ -42,15 +41,11 @@ struct CircuitAnalysis {
 /**
  * Analyze a straight-line scalar QCO entry point.
  *
- * When provided, logicalQubits keeps feature normalization stable after target
- * placement materializes otherwise unused device sites.
- *
  * Tensor-backed qubit registers and quantum control flow deliberately return
  * failure in schema v3. The predictor pass then uses the canonical Core
  * pipeline as its safe fallback.
  */
 [[nodiscard]] ::mlir::FailureOr<CircuitAnalysis>
-analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target,
-               std::optional<std::size_t> logicalQubits = std::nullopt);
+analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target);
 
 } // namespace mqt::predictor::compiler

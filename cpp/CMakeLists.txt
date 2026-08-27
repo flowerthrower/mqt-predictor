@@ -229,8 +229,21 @@ if(BUILD_TESTING)
     mqt-predictor-bootstrap-e2e
     PROPERTIES
       PASS_REGULAR_EXPRESSION
-      "step=2 action=terminate.*features=\\{c3sqrtx=.*z="
+      "step=2 action=terminate qubits=4.*liveness=4[.]464286e-01.*num_qubits=1[.]000000e[+]00.*parallelism=4[.]761905e-02.*program_communication=3[.]333333e-01"
       FAIL_REGULAR_EXPRESSION "falling back;error:")
+
+  add_test(
+    NAME mqt-predictor-unmapped-qubit-width-feature-e2e
+    COMMAND
+      mqt-predictor-cc --trace --max-steps=1 --target-qubits=4 -o
+      ${CMAKE_CURRENT_BINARY_DIR}/bell-unmapped-width.mlir
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/bell.qasm)
+  set_tests_properties(
+    mqt-predictor-unmapped-qubit-width-feature-e2e
+    PROPERTIES
+      PASS_REGULAR_EXPRESSION
+      "step=0 action=place-and-route qubits=3.*liveness=6[.]111111e-01.*num_qubits=7[.]500000e-01.*parallelism=0[.]000000e[+]00.*program_communication=1[.]000000e[+]00"
+      FAIL_REGULAR_EXPRESSION "unsupported QCO structure;error:")
 
   add_test(
     NAME mqt-predictor-rotations-e2e

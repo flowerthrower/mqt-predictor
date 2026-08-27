@@ -454,7 +454,6 @@ private:
       }
       return ::mlir::failure();
     }
-    const auto logicalQubits = initialAnalysis->features.numQubits;
     CompilerState policyState{};
 
     BootstrapLinearPolicy policy;
@@ -468,7 +467,7 @@ private:
       generator.seed(seed);
     }
     for (std::size_t step = 0; step < options_.maxSteps; ++step) {
-      auto analysis = analyzeCircuit(module, target, logicalQubits);
+      auto analysis = analyzeCircuit(module, target);
       if (failed(analysis)) {
         if (options_.trace) {
           llvm::errs() << "[mqt-predictor] unsupported QCO structure at step "

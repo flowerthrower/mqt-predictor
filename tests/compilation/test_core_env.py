@@ -58,12 +58,21 @@ class _FakeQCProgram:
     def to_qco(self) -> _FakeQCOProgram:
         return _FakeQCOProgram(self.compiler, self.circuit, self.ir)
 
-    def to_qiskit(self, *, target: object | None = None) -> QuantumCircuit:
+    def to_qiskit(self, *, target: _TargetLike | None = None) -> QuantumCircuit:
         self.compiler.exports.append(target)
         if any(marker in self.ir for marker in self.compiler.failing_export_markers):
             msg = f"failed export of {self.ir}"
             raise RuntimeError(msg)
         circuit = self.circuit.copy()
+        if target is not None and self.compiler.materialize_target_width:
+            expanded = QuantumCircuit(target.num_qubits, circuit.num_clbits)
+            expanded.compose(
+                circuit,
+                qubits=range(circuit.num_qubits),
+                clbits=range(circuit.num_clbits),
+                inplace=True,
+            )
+            circuit = expanded
         circuit.metadata = {"fake_ir": self.ir}
         return circuit
 
@@ -166,6 +175,7 @@ class _FakeCompiler:
         self.failing_export_markers: set[str] = set()
         self.action_delays: dict[str, float] = {}
         self.fail_compilation = False
+        self.materialize_target_width = False
 
 
 @pytest.fixture
@@ -312,6 +322,28 @@ def test_core_environment_has_compact_stable_abi(bell: QuantumCircuit, compiler:
     assert compiler.imports == 1
     assert compiler.cleanups == 1
     assert compiler.decompositions == 1
+
+
+def test_mapping_uses_materialized_target_width_for_qubit_features(compiler: _FakeCompiler) -> None:
+    """Target-aware observations use the exported circuit width in every qubit denominator."""
+    circuit = QuantumCircuit(2)
+    circuit.h(0)
+    circuit.h(1)
+    circuit.cx(0, 1)
+    compiler.materialize_target_width = True
+    env = _environment([circuit])
+
+    logical_observation, _ = env.reset(options={"circuit_index": 0})
+    mapped_observation, _, _, _, _ = env.step(3)
+
+    assert _feature(logical_observation, "num_qubits") == pytest.approx(0.5)
+    assert _feature(logical_observation, "program_communication") == pytest.approx(1.0)
+    assert _feature(logical_observation, "parallelism") == pytest.approx(0.5)
+    assert _feature(logical_observation, "liveness") == pytest.approx(1.0)
+    assert _feature(mapped_observation, "num_qubits") == pytest.approx(1.0)
+    assert _feature(mapped_observation, "program_communication") == pytest.approx(1 / 6)
+    assert _feature(mapped_observation, "parallelism") == pytest.approx(1 / 6)
+    assert _feature(mapped_observation, "liveness") == pytest.approx(0.5)
 
 
 def test_actions_keep_one_persistent_qco_state(bell: QuantumCircuit, compiler: _FakeCompiler) -> None:
@@ -695,7 +727,10 @@ def test_current_core_compiles_bell_for_iqm_garnet(
     mapped_observation, _, _, _, _ = env.step(3)
     mapped_qiskit = env.program.copy().to_qc().to_qiskit(target=target)
     assert mapped_qiskit.num_qubits == target.num_qubits
-    assert _feature(mapped_observation, "num_qubits") == pytest.approx(0.15)
+    assert _feature(mapped_observation, "num_qubits") == pytest.approx(1.0)
+    assert _feature(mapped_observation, "program_communication") == pytest.approx(8 / (20 * 19))
+    assert _feature(mapped_observation, "parallelism") == pytest.approx(0.0)
+    assert _feature(mapped_observation, "liveness") == pytest.approx(13 / (20 * 7))
 
     env.step(4)
     observation, reward, terminated, truncated, info = env.step(5)

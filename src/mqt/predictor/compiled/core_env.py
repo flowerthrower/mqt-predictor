@@ -176,10 +176,9 @@ def _prepare_reward_target(target: Target) -> Target:
 
 def _structural_features(
     circuit: QuantumCircuit,
-    *,
-    num_qubits: int,
 ) -> tuple[int, float, float, float, float, float]:
     """Reproduce the straight-line feature scan used by the C++ runtime."""
+    num_qubits = circuit.num_qubits
     states = [(0, 0)] * circuit.num_qubits
     interactions: set[tuple[int, int]] = set()
     num_gates = 0
@@ -279,7 +278,6 @@ class CorePredictorEnv(Env):
         self._routed = False
         self._synthesized = False
         self._circuit_index = 0
-        self._num_qubits = 0
         self._num_steps = 0
         self._episode_ended = False
         self._last_observation = {name: np.zeros(1, dtype=np.float32) for name in FEATURE_NAMES}
@@ -319,15 +317,10 @@ class CorePredictorEnv(Env):
         program: _QCOProgram,
         *,
         mapped: bool,
-        num_qubits: int,
     ) -> dict[str, NDArray[np.float32]]:
         circuit = self._as_qiskit(program, mapped=mapped)
-        # Target-aware Core export materializes the full device register. Keep
-        # the episode's logical width so these features match the C++ analysis.
-        depth, communication, critical_depth, entanglement_ratio, parallelism, liveness = _structural_features(
-            circuit,
-            num_qubits=num_qubits,
-        )
+        num_qubits = circuit.num_qubits
+        depth, communication, critical_depth, entanglement_ratio, parallelism, liveness = _structural_features(circuit)
         operation_counts = dict.fromkeys(V3_OPERATION_NAMES, 0)
         total_operations = 0
         for instruction in circuit.data:
@@ -384,17 +377,12 @@ class CorePredictorEnv(Env):
         program = self._compiler.QCProgram.from_qiskit(circuit).to_qco()
         program.cleanup()
         program.decompose_multi_controlled()
-        observation = self._observation_for(
-            program,
-            mapped=False,
-            num_qubits=circuit.num_qubits,
-        )
+        observation = self._observation_for(program, mapped=False)
 
         self._program = program
         self._mapped = False
         self._routed = False
         self._synthesized = False
-        self._num_qubits = circuit.num_qubits
         self._num_steps = 0
         self._episode_ended = False
         self._last_observation = observation
@@ -466,7 +454,6 @@ class CorePredictorEnv(Env):
         observation = self._observation_for(
             candidate,
             mapped=candidate_mapped,
-            num_qubits=self._num_qubits,
         )
         return (
             candidate,
@@ -498,7 +485,7 @@ class CorePredictorEnv(Env):
                     candidate.verify_target_conformance(self.target)
                 circuit = self._as_qiskit(candidate, mapped=True)
                 reward = expected_fidelity(circuit, self.reward_target)
-                observation = self._observation_for(candidate, mapped=True, num_qubits=self._num_qubits)
+                observation = self._observation_for(candidate, mapped=True)
             except Exception as error:  # ruff:ignore[blind-except]
                 return self._failed_step(error)
             self._program = candidate

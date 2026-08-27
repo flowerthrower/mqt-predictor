@@ -152,8 +152,7 @@ canonicalOperationName(::mlir::qco::UnitaryOpInterface unitary) {
 } // namespace
 
 ::mlir::FailureOr<CircuitAnalysis>
-analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target,
-               const std::optional<std::size_t> logicalQubits) {
+analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target) {
   using namespace ::mlir;
   using namespace ::mlir::qco;
 
@@ -426,12 +425,13 @@ analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target,
   if (numQubits == 0) {
     return failure();
   }
-  const auto featureQubits = logicalQubits.value_or(numQubits);
+
+  const auto mapped = dynamicRoots == 0 && staticRoots == numQubits;
+  const auto featureQubits = mapped ? target.numQubits() : numQubits;
   if (featureQubits == 0) {
     return failure();
   }
 
-  const auto mapped = dynamicRoots == 0 && staticRoots == numQubits;
   routed &= mapped;
 
   const auto communication =
