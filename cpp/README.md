@@ -201,7 +201,7 @@ These compiled-dependency Python tests and the CMake/CTest build are optional
 local validation. Normal Nox/CI sessions do not install the `compiled` group or
 configure this C++ experiment.
 
-## Training and model selection
+## Training and evaluation
 
 The Predictor compilation archive contains 500 QASM circuits. Exactly 440 have
 at most 20 qubits and form the full Garnet-compatible training corpus. The other
@@ -216,23 +216,19 @@ archive:       sha256:eac7f551b7a68e5d70274dc26e8831f02f1e8d76e4ad359a5d5889b2f1
 ordered names: sha256:a75e74282409b5ae88f30ad91dd34659418b8e20f44d2eb0b462d45488016ee9
 ```
 
-Three independent MaskablePPO candidates use seeds 7, 19, and 43. Each receives
-10,240 environment timesteps over the full corpus. The training configuration
-matches #798: `MaskableMultiInputActorCriticPolicy`, rollout size 2,048, batch
-size 64, ten epochs per update, `gamma=0.98`, learning rate `3e-4`, two 64-unit
-Tanh actor layers, two 64-unit Tanh critic layers, orthogonal initialization,
-and otherwise the same Stable-Baselines3 defaults. Every episode uses the
-20-decision horizon and terminal-only expected-fidelity reward described above.
+The factual-state actor was retrained once with seed 19. The request was 10,000
+environment timesteps; Stable-Baselines3 completes whole 2,048-step rollouts, so
+five updates produced 10,240 actual timesteps. The deterministic shuffled corpus
+cycle visited all 440 circuits and completed two full cycles in 53.25 seconds.
 
-Model selection is separate from training. The frozen MQT Bench study generated
-99 circuits from 35 families; 68 fit Garnet. Sorting those 68 labels assigns
-every fourth one-based entry to a 17-circuit validation split and the other 51
-to selection-heldout evaluation. Each candidate receives five stochastic trials
-per validation circuit, using sampling seeds 7, 19, 43, 71, and 97. Selection
-uses only mean validation episode return with every error or truncation counted
-as zero. The selection-heldout scores were not read until one candidate had been
-selected. This split is in-distribution and overlaps the training archive, so it
-is not evidence on unseen circuits.
+The training configuration matches #798: `MaskableMultiInputActorCriticPolicy`,
+rollout size 2,048, batch size 64, ten epochs per update, `gamma=0.98`, learning
+rate `3e-4`, two 64-unit Tanh actor layers, two 64-unit Tanh critic layers,
+orthogonal initialization, and otherwise the same Stable-Baselines3 defaults.
+Every episode uses the 20-decision horizon and terminal-only expected-fidelity
+reward described above. Training used source revision
+`87ebb46aed758ede7c06f576eb78a873e9f63256` and Core identity
+`99fd4d2ef93a8680ed17a9e7bed72bce77aaadce+patch.904aee31e1dc5f4796bb45c9931246cb72c9bedaa6aa6064a457d0b4de01aa66`.
 
 The fixed comparison schedule is `synthesize-for-target`,
 `fuse-two-qubit-gates`, `merge-single-qubit-rotation-gates`, `place-and-route`,
@@ -242,49 +238,33 @@ structural proxy.
 
 ## Results
 
-All means below include every failure, truncation, or frontend exclusion as a
-zero return. The complete r5 report has SHA-256
-`fd1163ce82c3da74d13b5d09f9e12e050824b253d9e54d4eab2b1c6c778bac8a`.
+The deployed factual-state ONNX actor has SHA-256
+`7ace5a7fcaf2e08e9e4dd8c51b0206dbc8601a7a631349a95468b32a39eb0955`. Its logits
+agree with the exported PyTorch actor within `3.58e-7` over 100 random feature
+vectors.
 
-| PPO seed | Validation mean | Successes | Mean successful decisions |
-| -------: | --------------: | --------: | ------------------------: |
-|        7 |        0.229484 |     70/85 |                     5.086 |
-|       19 |        0.230406 |     70/85 |                     5.357 |
-|       43 |        0.230175 |     70/85 |                     4.929 |
+The actor was evaluated on every training circuit once deterministically and
+five times stochastically with seeds 7, 19, 43, 71, and 97. All means include
+errors and truncations as zero.
 
-Seed 19 won by validation return. Its deployed ONNX file has SHA-256
-`b13f70516940408fda5e2b1ed806a735161b21f57fbda5a54398f04da671c3a3`. Only its
-Core compatibility metadata changed; the trained graph and weights are
-unchanged.
+| Inference              | Episodes | Successes | Mean expected fidelity | Mean decisions |
+| ---------------------- | -------: | --------: | ---------------------: | -------------: |
+| Deterministic          |      440 |       440 |               0.360133 |          3.130 |
+| Stochastic, five seeds |    2,200 |     2,200 |               0.365817 |          8.075 |
 
-| Python split                    |   Policy | Canonical Core | Fixed staged | Policy successes |
-| ------------------------------- | -------: | -------------: | -----------: | ---------------: |
-| Validation (17 circuits)        | 0.230406 |       0.228347 |     0.250389 |            70/85 |
-| Selection-heldout (51 circuits) | 0.208807 |       0.202299 |     0.221173 |          210/255 |
-| All 68 circuits                 | 0.214207 |       0.208811 |     0.228477 |          280/340 |
+There were no errors or horizon truncations. Stochastic inference improved over
+deterministic inference by `+0.005685` (`+1.58%`) at the cost of 4.95 additional
+decisions on average. Against fresh current-code baselines on the same 440
+circuits, it improved over canonical Core by `+0.000936` (`+0.257%`) and trailed
+the fixed staged schedule by `-0.017988` (`-4.687%`). Both baselines completed
+440/440 circuits without errors or timeouts; their mean expected fidelities were
+`0.364881` and `0.383805`, respectively.
 
-Thus the learned actor improved over canonical Core by `+0.005396` across the
-68-circuit study, but trailed the fixed staged schedule by `-0.014271`. On the
-56 circuits where the fixed baseline compiled, the policy was better, tied, or
-worse on 19, 8, and 29 circuits, respectively.
-
-The compiled MLIR/ONNX runtime scored `0.213356` on the same 340 stochastic
-trials. It completed 280 successfully; the 60 zero returns comprise 35 canonical
-fallbacks, 20 frontend exclusions, and 5 output-scoring failures. There were no
-watchdog or compiler-process failures. Native and Python success rates are both
-82.35%. Native minus Python return is `+0.002429` on validation, `-0.001943` on
-selection-heldout, and `-0.000850` overall. These are aggregate comparisons:
-NumPy and C++ use different random-number engines, so equal sampling-seed labels
-do not create paired trajectories.
-
-The selected actor was also replayed five times on every circuit in the complete
-440-circuit training corpus. All 2,200 episodes terminated successfully within
-the 20-action horizon. Its mean expected fidelity was `0.372315` at 5.079 mean
-decisions, versus `0.364881` for canonical Core (`+0.007434`; better/tied/worse
-on 399/22/19 circuits) and `0.383805` for the fixed schedule (`-0.011490`;
-128/22/290). This is training-corpus evidence, not a generalization estimate.
-The full-corpus report has SHA-256
-`2d17eaf74d0238fa098e525bdf5b53d2fb18e124e314230569a84a51ca686e55`.
+This is training-corpus evidence, not a generalization estimate. The complete
+episode-level policy report has SHA-256
+`551db39d44559501932731a9543a41f133ed4d367d33aea86944f571d0be74b5`; the baseline
+report has SHA-256
+`e3480f9589f5d2939d7ea27483761de2526269786a4d17346867c5b8d3e32085`.
 
 ## Input, timeout, and fallback boundary
 
