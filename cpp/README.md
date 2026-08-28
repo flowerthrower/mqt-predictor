@@ -78,11 +78,12 @@ target conformance before accepting termination. There is no retry suppression,
 pass-history feature, or budget reservation for later actions.
 
 The horizon is 20 total policy decisions, including `terminate`. Termination may
-succeed as the twentieth decision. A twentieth non-termination action truncates
-the episode. Non-terminal actions return zero reward. Successful termination
-returns the absolute expected fidelity; pass errors, timeouts, and truncation
-return zero. This is the terminal-only reward contract of #798, not the
-intermediate-reward change from later work.
+succeed as the twentieth decision. A twentieth non-termination action ends the
+episode as a terminal failure, which prevents PPO from bootstrapping beyond the
+hard deployment horizon. Non-terminal actions return zero reward. Successful
+termination returns the absolute expected fidelity; pass errors and timeouts
+truncate with zero reward. This is the terminal-only reward contract of #798,
+not the intermediate-reward change from later work.
 
 Expected fidelity is computed directly from the same Core `CompilerTarget`
 snapshot used for compilation. The target is populated by the QDMI device and
@@ -226,8 +227,10 @@ rollout size 2,048, batch size 64, ten epochs per update, `gamma=0.98`, learning
 rate `3e-4`, two 64-unit Tanh actor layers, two 64-unit Tanh critic layers,
 orthogonal initialization, and otherwise the same Stable-Baselines3 defaults.
 Every episode uses the 20-decision horizon and terminal-only expected-fidelity
-reward described above. Training used source revision
-`87ebb46aed758ede7c06f576eb78a873e9f63256` and Core identity
+reward. The checked-in actor predates the horizon correction above: max-step
+exhaustion was still reported as a truncation during that training run. Training
+used source revision `87ebb46aed758ede7c06f576eb78a873e9f63256` and Core
+identity
 `99fd4d2ef93a8680ed17a9e7bed72bce77aaadce+patch.904aee31e1dc5f4796bb45c9931246cb72c9bedaa6aa6064a457d0b4de01aa66`.
 
 The fixed comparison schedule is `synthesize-for-target`,
@@ -252,7 +255,7 @@ errors and truncations as zero.
 | Deterministic          |      440 |       440 |               0.360133 |          3.130 |
 | Stochastic, five seeds |    2,200 |     2,200 |               0.365817 |          8.075 |
 
-There were no errors or horizon truncations. Stochastic inference improved over
+There were no errors or horizon exhaustions. Stochastic inference improved over
 deterministic inference by `+0.005685` (`+1.58%`) at the cost of 4.95 additional
 decisions on average. Against fresh current-code baselines on the same 440
 circuits, it improved over canonical Core by `+0.000936` (`+0.257%`) and trailed
@@ -285,7 +288,7 @@ process with an external watchdog. Embedders that require a hard wall-clock
 limit must provide the same process boundary; the 20-action horizon is not a
 wall-clock timeout.
 
-For an ordinary model error or horizon truncation that returns control, the C++
+For an ordinary model error or horizon exhaustion that returns control, the C++
 pass restores the original module and attempts Core's canonical target pipeline.
 This protects compilation, but evaluation still assigns the failed model episode
 zero rather than crediting it with the fallback's result. A pass that never

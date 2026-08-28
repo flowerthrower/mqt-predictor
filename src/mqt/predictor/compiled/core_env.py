@@ -455,16 +455,16 @@ class CorePredictorEnv(Env):
         self._synthesized = candidate_synthesized
         self._num_steps += 1
         self._last_observation = observation
-        truncated = self._num_steps >= self.max_steps
-        self._episode_ended = truncated
+        terminated = self._num_steps >= self.max_steps
+        self._episode_ended = terminated
         return (
             observation,
             0.0,
+            terminated,
             False,
-            truncated,
             {
                 "changed": changed,
-                **({"truncation_reason": "max_steps_exceeded"} if truncated else {}),
+                **({"termination_reason": "max_steps_exceeded"} if terminated else {}),
                 **self._state_info(),
             },
         )

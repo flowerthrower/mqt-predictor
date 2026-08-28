@@ -680,10 +680,10 @@ def test_termination_only_verifies_compiled_state(bell: QuantumCircuit, compiler
 
 
 @pytest.mark.usefixtures("compiler")
-def test_exact_step_cap_truncates_with_zero_reward(
+def test_exact_step_cap_terminates_with_zero_reward(
     bell: QuantumCircuit,
 ) -> None:
-    """Every nonterminal action consumes a horizon slot regardless of state."""
+    """The hard horizon is terminal so PPO cannot bootstrap past it."""
     env = _environment([bell], max_steps=1)
     env.reset()
 
@@ -691,9 +691,9 @@ def test_exact_step_cap_truncates_with_zero_reward(
 
     assert env.num_steps == 1
     assert reward == pytest.approx(0.0)
-    assert not terminated
-    assert truncated
-    assert info["truncation_reason"] == "max_steps_exceeded"
+    assert terminated
+    assert not truncated
+    assert info["termination_reason"] == "max_steps_exceeded"
     with pytest.raises(RuntimeError, match="episode has ended"):
         env.step(0)
 
@@ -712,8 +712,8 @@ def test_horizon_counts_termination_and_does_not_reserve_stage_slots(
     _, reward, terminated, truncated, _ = env.step(4)
 
     assert reward == pytest.approx(0.0)
-    assert not terminated
-    assert truncated
+    assert terminated
+    assert not truncated
 
     env = _environment([bell], max_steps=3)
     env.reset()
