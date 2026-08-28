@@ -11,10 +11,11 @@
 from __future__ import annotations
 
 import math
+import operator
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 import numpy as np
 import pytest
@@ -22,9 +23,6 @@ from gymnasium.spaces import Dict as DictSpace
 from gymnasium.spaces import Discrete
 from mqt.bench import BenchmarkLevel, get_benchmark
 from qiskit import QuantumCircuit, qasm3
-from qiskit.circuit import Measure
-from qiskit.circuit.library import CXGate, CZGate, HGate
-from qiskit.transpiler import InstructionProperties, Target
 
 from mqt.predictor.compiled import ACTION_NAMES, FEATURE_NAMES, CorePredictorEnv, core_env
 
@@ -40,11 +38,93 @@ class _TargetLike(Protocol):
     num_qubits: int
 
 
-@dataclass(frozen=True)
+class _NativeMetrics(Protocol):
+    """Native metric surface asserted by the binding tests."""
+
+    operation_counts: dict[str, int]
+    num_qubits: int
+    depth: int
+    two_qubit_depth: int
+    mapped: bool
+    routed: bool
+    synthesized: bool
+
+
+class _NativeProgram(Protocol):
+    """Native QCO methods asserted by the binding tests."""
+
+    def analyze_for_target(self, target: object) -> _NativeMetrics: ...
+
+    def expected_fidelity(self, target: object) -> float: ...
+
+
+@dataclass
 class _FakeTarget:
     """Minimal compiler target for environment tests."""
 
     num_qubits: int = 4
+    fidelity: float = 0.99 * 0.98 * 0.97**2
+
+
+@dataclass(frozen=True)
+class _FakeMetrics:
+    """Owned native-analysis result returned by the fake program."""
+
+    operation_counts: dict[str, int]
+    total_operations: int
+    num_qubits: int
+    depth: int
+    critical_depth: float
+    entanglement_ratio: float
+    parallelism: float
+    liveness: float
+    program_communication: float
+
+
+def _metrics_for(circuit: QuantumCircuit, *, num_qubits: int) -> _FakeMetrics:
+    states = [(0, 0)] * circuit.num_qubits
+    interactions: set[tuple[int, int]] = set()
+    operation_counts: dict[str, int] = {}
+    num_gates = 0
+    num_two_qubit_gates = 0
+    total_operations = 0
+    activity = 0
+    maximum = (0, 0)
+    for instruction in circuit.data:
+        operation = instruction.operation
+        qubits = tuple(circuit.find_bit(qubit).index for qubit in instruction.qubits)
+        if operation.name == "barrier" or not qubits:
+            continue
+        total_operations += 1
+        operation_counts[operation.name] = operation_counts.get(operation.name, 0) + 1
+        prior = max((states[qubit] for qubit in qubits), key=operator.itemgetter(0))
+        if operation.name in {"measure", "reset"}:
+            next_state = (prior[0] + 1, prior[1])
+        else:
+            is_two_qubit = len(qubits) == 2
+            next_state = (prior[0] + 1, prior[1] + int(is_two_qubit))
+            num_gates += 1
+            num_two_qubit_gates += int(is_two_qubit)
+            if is_two_qubit:
+                interactions.add(tuple(sorted(qubits)))
+        activity += len(qubits)
+        for qubit in qubits:
+            states[qubit] = next_state
+        if next_state[0] >= maximum[0]:
+            maximum = next_state
+
+    depth, two_qubit_depth = maximum
+    return _FakeMetrics(
+        operation_counts=operation_counts,
+        total_operations=total_operations,
+        num_qubits=num_qubits,
+        depth=depth,
+        critical_depth=two_qubit_depth / num_two_qubit_gates if num_two_qubit_gates else 0.0,
+        entanglement_ratio=num_two_qubit_gates / num_gates if num_gates else 0.0,
+        parallelism=max(((num_gates / depth) - 1) / (num_qubits - 1), 0.0) if num_qubits > 1 and depth else 0.0,
+        liveness=activity / (num_qubits * depth) if num_qubits and depth else 0.0,
+        program_communication=2 * len(interactions) / (num_qubits * (num_qubits - 1)) if num_qubits > 1 else 0.0,
+    )
 
 
 class _FakeQCProgram:
@@ -57,24 +137,6 @@ class _FakeQCProgram:
 
     def to_qco(self) -> _FakeQCOProgram:
         return _FakeQCOProgram(self.compiler, self.circuit, self.ir)
-
-    def to_qiskit(self, *, target: _TargetLike | None = None) -> QuantumCircuit:
-        self.compiler.exports.append(target)
-        if any(marker in self.ir for marker in self.compiler.failing_export_markers):
-            msg = f"failed export of {self.ir}"
-            raise RuntimeError(msg)
-        circuit = self.circuit.copy()
-        if target is not None and self.compiler.materialize_target_width:
-            expanded = QuantumCircuit(target.num_qubits, circuit.num_clbits)
-            expanded.compose(
-                circuit,
-                qubits=range(circuit.num_qubits),
-                clbits=range(circuit.num_clbits),
-                inplace=True,
-            )
-            circuit = expanded
-        circuit.metadata = {"fake_ir": self.ir}
-        return circuit
 
 
 class _FakeQCOProgram(_FakeQCProgram):
@@ -130,6 +192,18 @@ class _FakeQCOProgram(_FakeQCProgram):
     def verify_target_conformance(self, _target: object) -> None:
         self._apply_stage("verify-target-conformance")
 
+    def analyze_for_target(self, target: _TargetLike) -> _FakeMetrics:
+        self.compiler.analyses.append(target)
+        if any(marker in self.ir for marker in self.compiler.failing_analysis_markers):
+            msg = f"failed analysis of {self.ir}"
+            raise RuntimeError(msg)
+        mapped = "|place-and-route" in self.ir
+        return _metrics_for(self.circuit, num_qubits=target.num_qubits if mapped else self.circuit.num_qubits)
+
+    def expected_fidelity(self, target: _FakeTarget) -> float:
+        self.compiler.fidelity_targets.append(target)
+        return target.fidelity
+
     def compile_for_target(self, _target: object) -> None:
         self.compiler.compilations += 1
         self.compiler.compilation_inputs.append(self.ir)
@@ -138,9 +212,6 @@ class _FakeQCOProgram(_FakeQCProgram):
             msg = "failed target compilation"
             raise RuntimeError(msg)
         self.ir += "|compiled"
-
-    def to_qc(self) -> _FakeQCProgram:
-        return _FakeQCProgram(self.compiler, self.circuit, self.ir)
 
 
 class _FakeQCProgramFactory:
@@ -167,15 +238,15 @@ class _FakeCompiler:
         self.stage_calls: list[tuple[str, str]] = []
         self.fuse_bases: list[str] = []
         self.compilation_inputs: list[str] = []
-        self.exports: list[object | None] = []
+        self.analyses: list[object] = []
+        self.fidelity_targets: list[object] = []
         self.noop_actions: set[str] = set()
         self.noop_stages: set[str] = set()
         self.failing_actions: set[str] = set()
         self.failing_stages: set[str] = set()
-        self.failing_export_markers: set[str] = set()
+        self.failing_analysis_markers: set[str] = set()
         self.action_delays: dict[str, float] = {}
         self.fail_compilation = False
-        self.materialize_target_width = False
 
 
 @pytest.fixture
@@ -196,39 +267,16 @@ def compiler(monkeypatch: pytest.MonkeyPatch) -> _FakeCompiler:
     return fake
 
 
-def _reward_target(*, num_qubits: int = 4) -> Target:
-    target = Target(num_qubits=num_qubits)
-    target.add_instruction(
-        HGate(),
-        {(qubit,): InstructionProperties(error=0.01) for qubit in range(num_qubits)},
-    )
-    target.add_instruction(
-        CXGate(),
-        {
-            (control, target_qubit): InstructionProperties(error=0.02)
-            for control in range(num_qubits)
-            for target_qubit in range(num_qubits)
-            if control != target_qubit
-        },
-    )
-    target.add_instruction(
-        Measure(),
-        {(qubit,): InstructionProperties(error=0.03) for qubit in range(num_qubits)},
-    )
-    return target
-
-
 def _environment(
     circuits: Sequence[QuantumCircuit],
     *,
     max_steps: int = 20,
     pass_timeout: float | None = None,
-    reward_target: Target | None = None,
+    target: _FakeTarget | None = None,
 ) -> CorePredictorEnv:
     return CorePredictorEnv(
         circuits,
-        _FakeTarget(),
-        _reward_target() if reward_target is None else reward_target,
+        _FakeTarget() if target is None else target,
         max_steps=max_steps,
         pass_timeout=pass_timeout,
     )
@@ -324,13 +372,13 @@ def test_core_environment_has_compact_stable_abi(bell: QuantumCircuit, compiler:
     assert compiler.decompositions == 1
 
 
-def test_mapping_uses_materialized_target_width_for_qubit_features(compiler: _FakeCompiler) -> None:
-    """Target-aware observations use the exported circuit width in every qubit denominator."""
+@pytest.mark.usefixtures("compiler")
+def test_mapping_uses_materialized_target_width_for_qubit_features() -> None:
+    """Target-aware analysis uses physical width in every mapped denominator."""
     circuit = QuantumCircuit(2)
     circuit.h(0)
     circuit.h(1)
     circuit.cx(0, 1)
-    compiler.materialize_target_width = True
     env = _environment([circuit])
 
     logical_observation, _ = env.reset(options={"circuit_index": 0})
@@ -513,19 +561,19 @@ def test_terminal_failure_does_not_commit_partial_program(bell: QuantumCircuit, 
 
 
 @pytest.mark.parametrize("action", [0, 5])
-def test_export_failure_does_not_commit_candidate(
+def test_analysis_failure_does_not_commit_candidate(
     bell: QuantumCircuit,
     compiler: _FakeCompiler,
     action: int,
 ) -> None:
-    """Observation export is part of the same transaction as the Core action."""
+    """Native observation analysis is transactional with the Core action."""
     env = _environment([bell])
     env.reset()
     if action == 5:
         env.step(3)
         env.step(4)
     original = env.program.ir
-    compiler.failing_export_markers.add(ACTION_NAMES[0] if action == 0 else ACTION_NAMES[4])
+    compiler.failing_analysis_markers.add(ACTION_NAMES[0] if action == 0 else ACTION_NAMES[4])
 
     _, reward, terminated, truncated, info = env.step(action)
 
@@ -534,7 +582,7 @@ def test_export_failure_does_not_commit_candidate(
     assert reward == pytest.approx(0.0)
     assert not terminated
     assert truncated
-    assert "failed export" in str(info["Truncated because of error"])
+    assert "failed analysis" in str(info["Truncated because of error"])
 
 
 def test_termination_only_verifies_compiled_state(bell: QuantumCircuit, compiler: _FakeCompiler) -> None:
@@ -556,7 +604,7 @@ def test_termination_only_verifies_compiled_state(bell: QuantumCircuit, compiler
     assert not truncated
     assert info["steps"] == 3
     assert env.num_steps == 3
-    assert compiler.exports[-1] is env.target
+    assert compiler.fidelity_targets[-1] is env.target
 
 
 @pytest.mark.usefixtures("compiler")
@@ -623,21 +671,13 @@ def test_environment_rejects_more_than_twenty_steps(bell: QuantumCircuit) -> Non
         _environment([bell], max_steps=21)
 
 
-def test_environment_requires_matching_core_and_reward_targets(bell: QuantumCircuit) -> None:
-    """Training cannot silently combine calibrations from another device width."""
-    with pytest.raises(ValueError, match="same number of qubits"):
-        CorePredictorEnv([bell], _FakeTarget(), Target(num_qubits=3))
-
-
-def test_reverse_cz_uses_the_same_symmetric_calibration(
+def test_terminal_reward_uses_the_core_target(
+    bell: QuantumCircuit,
     compiler: _FakeCompiler,
 ) -> None:
-    """Core operand reversal remains scoreable without general edge mirroring."""
-    circuit = QuantumCircuit(2)
-    circuit.cz(1, 0)
-    reward_target = Target(num_qubits=4)
-    reward_target.add_instruction(CZGate(), {(0, 1): InstructionProperties(error=0.2)})
-    env = _environment([circuit], reward_target=reward_target, max_steps=3)
+    """The same Core target drives compilation and native terminal quality."""
+    target = _FakeTarget(fidelity=0.8)
+    env = _environment([bell], target=target, max_steps=3)
     env.reset()
     env.step(3)
     env.step(4)
@@ -647,19 +687,8 @@ def test_reverse_cz_uses_the_same_symmetric_calibration(
     assert reward == pytest.approx(0.8)
     assert terminated
     assert not truncated
-    assert (1, 0) not in reward_target["cz"]
-    assert env.reward_target["cz"][1, 0] is env.reward_target["cz"][0, 1]
+    assert compiler.fidelity_targets == [target]
     assert compiler.imports == 1
-
-
-def test_reward_target_does_not_mirror_directional_gates() -> None:
-    """Only CZ receives the narrow swap-invariant calibration completion."""
-    reward_target = Target(num_qubits=2)
-    reward_target.add_instruction(CXGate(), {(0, 1): InstructionProperties(error=0.2)})
-
-    prepared = core_env._prepare_reward_target(reward_target)  # ruff: ignore[private-member-access]
-
-    assert (1, 0) not in prepared["cx"]
 
 
 def test_pass_timeout_truncates_without_committing_partial_state(
@@ -691,11 +720,213 @@ def test_pass_timeout_must_be_positive(bell: QuantumCircuit) -> None:
         _environment([bell], pass_timeout=0.0)
 
 
-def _iqm_targets() -> tuple[_TargetLike, Target]:
+def _iqm_target() -> _TargetLike:
     compiler = pytest.importorskip("mqt.core.mlir")
-    qiskit_plugin = pytest.importorskip("mqt.core.plugins.qiskit")
-    backend = qiskit_plugin.QDMIBackend.from_device_id("mqt.sc.iqm.garnet")
-    return compiler.CompilerTarget.from_device(backend.device), backend.target
+    return compiler.CompilerTarget.from_device_id("mqt.sc.iqm.garnet")
+
+
+def _static_control_program(gate: str, *, control_site: int = 1, target_site: int = 0) -> _NativeProgram:
+    compiler = pytest.importorskip("mqt.core.mlir")
+    return cast(
+        "_NativeProgram",
+        compiler.QCOProgram.from_mlir_str(
+            f"""module {{
+  func.func @main() attributes {{mqt.entry_point}} {{
+    %q0 = qco.static {control_site} : !qco.qubit
+    %q1 = qco.static {target_site} : !qco.qubit
+    %control, %target = qco.ctrl(%q0) targets (%arg0 = %q1) {{
+      %out = qco.{gate} %arg0 : !qco.qubit -> !qco.qubit
+      qco.yield %out : !qco.qubit
+    }} : ({{!qco.qubit}}, {{!qco.qubit}}) -> ({{!qco.qubit}}, {{!qco.qubit}})
+    %q0_out, %bit0 = qco.measure %control : !qco.qubit
+    %q1_out, %bit1 = qco.measure %target : !qco.qubit
+    qco.sink %q0_out : !qco.qubit
+    qco.sink %q1_out : !qco.qubit
+    return
+  }}
+}}""",
+        ),
+    )
+
+
+def test_current_core_native_analysis_and_fidelity_resolution() -> None:
+    """Native metrics and target calibration replace both Qiskit round-trips."""
+    compiler = pytest.importorskip("mqt.core.mlir")
+    program = _static_control_program("z")
+    measurement = compiler.CompilerTarget.Operation(
+        "measure",
+        1,
+        0,
+        site_tuples=[
+            compiler.CompilerTarget.SiteTuple([0], fidelity=0.9),
+            compiler.CompilerTarget.SiteTuple([1], fidelity=0.9),
+        ],
+    )
+    reverse_cz = compiler.CompilerTarget(
+        2,
+        couplings=[(0, 1)],
+        operations=[
+            compiler.CompilerTarget.Operation(
+                "cz",
+                2,
+                0,
+                site_tuples=[compiler.CompilerTarget.SiteTuple([0, 1], fidelity=0.8)],
+            ),
+            measurement,
+        ],
+    )
+
+    metrics = program.analyze_for_target(reverse_cz)
+
+    assert metrics.operation_counts == {"cz": 1, "measure": 2}
+    assert (metrics.num_qubits, metrics.depth, metrics.two_qubit_depth) == (2, 2, 1)
+    assert metrics.mapped
+    assert metrics.routed
+    assert metrics.synthesized
+    assert program.expected_fidelity(reverse_cz) == pytest.approx(0.648)
+
+    exact_override = compiler.CompilerTarget(
+        2,
+        couplings=[(0, 1)],
+        operations=[
+            compiler.CompilerTarget.Operation(
+                "cz",
+                2,
+                0,
+                site_tuples=[compiler.CompilerTarget.SiteTuple([1, 0], fidelity=0.7)],
+                fidelity=0.5,
+            ),
+            measurement,
+        ],
+    )
+    default_cz = compiler.CompilerTarget(
+        2,
+        couplings=[(0, 1)],
+        operations=[
+            compiler.CompilerTarget.Operation("cz", 2, 0, fidelity=0.6),
+            measurement,
+        ],
+    )
+
+    assert program.expected_fidelity(exact_override) == pytest.approx(0.567)
+    assert program.expected_fidelity(default_cz) == pytest.approx(0.486)
+
+    split_capabilities = compiler.CompilerTarget(
+        3,
+        couplings=[(0, 1), (1, 2)],
+        operations=[
+            compiler.CompilerTarget.Operation(
+                "cz",
+                2,
+                0,
+                site_tuples=[compiler.CompilerTarget.SiteTuple([0, 1], fidelity=0.4)],
+            ),
+            compiler.CompilerTarget.Operation(
+                "cz",
+                2,
+                0,
+                site_tuples=[compiler.CompilerTarget.SiteTuple([1, 2], fidelity=0.8)],
+            ),
+            compiler.CompilerTarget.Operation("measure", 1, 0, fidelity=0.9),
+        ],
+    )
+    split_program = _static_control_program("z", control_site=1, target_site=2)
+    assert split_program.expected_fidelity(split_capabilities) == pytest.approx(0.648)
+
+
+def test_current_core_native_fidelity_resolves_controlled_parameters() -> None:
+    """Controlled gates use their body unitary's parameter count for target lookup."""
+    compiler = pytest.importorskip("mqt.core.mlir")
+    program = cast(
+        "_NativeProgram",
+        compiler.QCOProgram.from_mlir_str(
+            """module {
+  func.func @main() attributes {mqt.entry_point} {
+    %theta = arith.constant 5.000000e-01 : f64
+    %q0 = qco.static 1 : !qco.qubit
+    %q1 = qco.static 0 : !qco.qubit
+    %control, %target = qco.ctrl(%q0) targets (%arg0 = %q1) {
+      %out = qco.rx(%theta) %arg0 : !qco.qubit -> !qco.qubit
+      qco.yield %out : !qco.qubit
+    } : ({!qco.qubit}, {!qco.qubit}) -> ({!qco.qubit}, {!qco.qubit})
+    %q0_out, %bit0 = qco.measure %control : !qco.qubit
+    %q1_out, %bit1 = qco.measure %target : !qco.qubit
+    qco.sink %q0_out : !qco.qubit
+    qco.sink %q1_out : !qco.qubit
+    return
+  }
+}"""
+        ),
+    )
+    target = compiler.CompilerTarget(
+        2,
+        couplings=[(0, 1)],
+        operations=[
+            compiler.CompilerTarget.Operation(
+                "crx",
+                2,
+                1,
+                site_tuples=[compiler.CompilerTarget.SiteTuple([1, 0], fidelity=0.8)],
+            ),
+            compiler.CompilerTarget.Operation("measure", 1, 0, fidelity=0.9),
+        ],
+    )
+
+    assert program.expected_fidelity(target) == pytest.approx(0.648)
+
+
+def test_current_core_native_fidelity_rejects_directional_or_missing_calibration() -> None:
+    """Only CZ may reverse a tuple, and absent fidelity is never assumed perfect."""
+    compiler = pytest.importorskip("mqt.core.mlir")
+    program = _static_control_program("x")
+    measurement = compiler.CompilerTarget.Operation("measure", 1, 0, fidelity=0.9)
+    directional_target = compiler.CompilerTarget(
+        2,
+        couplings=[(0, 1)],
+        operations=[
+            compiler.CompilerTarget.Operation(
+                "cx",
+                2,
+                0,
+                site_tuples=[compiler.CompilerTarget.SiteTuple([0, 1], fidelity=0.8)],
+            ),
+            measurement,
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="complete target calibration"):
+        program.expected_fidelity(directional_target)
+
+    missing_measurement = compiler.CompilerTarget(
+        2,
+        couplings=[(0, 1)],
+        operations=[
+            compiler.CompilerTarget.Operation(
+                "cx",
+                2,
+                0,
+                site_tuples=[compiler.CompilerTarget.SiteTuple([1, 0], fidelity=0.8)],
+            ),
+            compiler.CompilerTarget.Operation("measure", 1, 0),
+        ],
+    )
+    with pytest.raises(RuntimeError, match="complete target calibration"):
+        program.expected_fidelity(missing_measurement)
+
+    out_of_target = cast(
+        "_NativeProgram",
+        compiler.QCOProgram.from_mlir_str(
+            """module {
+  func.func @main() attributes {mqt.entry_point} {
+    %q = qco.static 99 : !qco.qubit
+    qco.sink %q : !qco.qubit
+    return
+  }
+}"""
+        ),
+    )
+    with pytest.raises(RuntimeError, match="complete target calibration"):
+        out_of_target.expected_fidelity(missing_measurement)
 
 
 def test_current_core_compiles_bell_for_iqm_garnet(
@@ -705,8 +936,8 @@ def test_current_core_compiles_bell_for_iqm_garnet(
     """The optional current-Core dependency supports the complete environment boundary."""
     monkeypatch.chdir(tmp_path)
     pytest.importorskip("mqt.core.mlir")
-    target, reward_target = _iqm_targets()
-    env = CorePredictorEnv([qasm3.load(INPUTS / "bell.qasm")], target, reward_target, max_steps=3)
+    target = _iqm_target()
+    env = CorePredictorEnv([qasm3.load(INPUTS / "bell.qasm")], target, max_steps=3)
 
     observation, _ = env.reset(options={"circuit_index": 0})
     assert env.observation_space.contains(observation)
@@ -725,8 +956,6 @@ def test_current_core_compiles_bell_for_iqm_garnet(
         assert _feature(observation, name) == pytest.approx(value, rel=1e-6, abs=1e-6)
 
     mapped_observation, _, _, _, _ = env.step(3)
-    mapped_qiskit = env.program.copy().to_qc().to_qiskit(target=target)
-    assert mapped_qiskit.num_qubits == target.num_qubits
     assert _feature(mapped_observation, "num_qubits") == pytest.approx(1.0)
     assert _feature(mapped_observation, "program_communication") == pytest.approx(8 / (20 * 19))
     assert _feature(mapped_observation, "parallelism") == pytest.approx(0.0)
@@ -800,8 +1029,8 @@ def test_current_core_fusion_keeps_bell_observable(
     """The shared ``u`` fusion basis remains exportable for the next observation."""
     monkeypatch.chdir(tmp_path)
     pytest.importorskip("mqt.core.mlir")
-    target, reward_target = _iqm_targets()
-    env = CorePredictorEnv([bell], target, reward_target, max_steps=3)
+    target = _iqm_target()
+    env = CorePredictorEnv([bell], target, max_steps=3)
     env.reset(options={"circuit_index": 0})
 
     observation, reward, terminated, truncated, _ = env.step(1)
@@ -819,8 +1048,8 @@ def test_current_core_decomposes_wide_gates_during_reset(
     """Reset makes the optimization actions safe by decomposing wide controls."""
     monkeypatch.chdir(tmp_path)
     pytest.importorskip("mqt.core.mlir")
-    target, reward_target = _iqm_targets()
-    env = CorePredictorEnv([qasm3.load(INPUTS / "wide.qasm")], target, reward_target, max_steps=3)
+    target = _iqm_target()
+    env = CorePredictorEnv([qasm3.load(INPUTS / "wide.qasm")], target, max_steps=3)
     env.reset(options={"circuit_index": 0})
 
     assert env.action_masks() == [True, True, True, True, True, False]
@@ -839,12 +1068,12 @@ def test_current_core_native_input_uses_action_derived_stages(
     """Training and compiled inference share conservative phase transitions."""
     monkeypatch.chdir(tmp_path)
     pytest.importorskip("mqt.core.mlir")
-    target, reward_target = _iqm_targets()
+    target = _iqm_target()
     circuit = QuantumCircuit(2, 2)
     circuit.r(0.5, 0.2, 0)
     circuit.cz(0, 1)
     circuit.measure([0, 1], [0, 1])
-    env = CorePredictorEnv([circuit], target, reward_target, max_steps=3)
+    env = CorePredictorEnv([circuit], target, max_steps=3)
 
     env.reset(options={"circuit_index": 0})
     assert env.action_masks() == [True, True, True, True, True, False]
@@ -866,9 +1095,9 @@ def test_current_core_qft_uses_compiled_critical_path_semantics(
     """The Python observation matches C++ tie-breaking on QFT critical paths."""
     monkeypatch.chdir(tmp_path)
     pytest.importorskip("mqt.core.mlir")
-    target, reward_target = _iqm_targets()
+    target = _iqm_target()
     circuit = get_benchmark("qft", BenchmarkLevel.ALG, 4)
-    env = CorePredictorEnv([circuit], target, reward_target, max_steps=1)
+    env = CorePredictorEnv([circuit], target, max_steps=1)
 
     observation, _ = env.reset(options={"circuit_index": 0})
 

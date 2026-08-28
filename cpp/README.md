@@ -1,11 +1,12 @@
 # Compiled Core pass-ordering experiment
 
 This directory contains an experimental MLIR `ModuleOp` pass that uses a trained
-policy to order only MQT Core QCO passes. Python supplies training,
-Qiskit-to-Core input conversion, reward calculation, and ONNX export. Deployment
-is C++ only: ONNX Runtime evaluates the actor inside the MLIR pass, while MQT
-Core applies every selected transformation. Qiskit, TKET, BQSKit, and other SDK
-compiler passes are not policy actions.
+policy to order only MQT Core QCO passes. Python supplies training, one-time
+Qiskit-to-Core input conversion, and ONNX export. MQT Core supplies the shared
+QCO feature analysis and target-calibration reward. Deployment is C++ only: ONNX
+Runtime evaluates the actor inside the MLIR pass, while MQT Core applies every
+selected transformation. Qiskit, TKET, BQSKit, and other SDK compiler passes are
+not policy actions.
 
 The alignment target is Predictor pull request
 [#798](https://github.com/munich-quantum-toolkit/predictor/pull/798) at commit
@@ -20,13 +21,14 @@ The policy-training and export source revision is
 runtime share this exact Core compatibility identity:
 
 ```text
-99fd4d2ef93a8680ed17a9e7bed72bce77aaadce+patch.e761b935ad001c122eb34044da3468844a7caf2d35edaff41e63492fcd665a01
+99fd4d2ef93a8680ed17a9e7bed72bce77aaadce+patch.904aee31e1dc5f4796bb45c9931246cb72c9bedaa6aa6064a457d0b4de01aa66
 ```
 
 The first component is the MQT Core revision. The second is the SHA-256 of
 `patches/mqt-core-predictor-stages.patch`, which exposes the staged target
-operations and orders mapping-ready operations by MLIR block order. The IQM
-Garnet target fingerprint for the trained policy is:
+operations, orders mapping-ready operations by MLIR block order, and provides
+the shared QCO analysis and native expected-fidelity calculation. The IQM Garnet
+target fingerprint for the trained policy is:
 
 ```text
 sha256:d9be5c92985ee59418ff58317a2a7ce2c24a6c08a515fe34d192d3dde8f00599
@@ -37,14 +39,16 @@ sha256:d9be5c92985ee59418ff58317a2a7ce2c24a6c08a515fe34d192d3dde8f00599
 ```text
 Python training
   Qiskit circuit -> Core QCO -> CorePredictorEnv
+    -> Core QCO analysis after each action
+    -> Core target-calibration fidelity at termination
     -> MaskablePPO actor  50 -> 64 -> 64 -> 6
     -> MaskablePPO critic 50 -> 64 -> 64 -> 1  (training only)
     -> actor ONNX
 
 C++ deployment
-  raw unmapped QCO ModuleOp -> 50 features + legal-action mask
+  raw unmapped QCO ModuleOp -> cached Core QCO analysis + legal-action mask
     -> ONNX Runtime logits -> masked categorical sample
-    -> selected Core QCO pass -> same ModuleOp
+    -> selected Core QCO pass -> invalidated/recomputed analysis -> same ModuleOp
 ```
 
 `CorePredictorEnv` calls `QCProgram.from_qiskit(circuit).to_qco()` once, runs
@@ -64,8 +68,12 @@ including when they have no effect and after mapping or synthesis. Every
 selection still consumes one decision. A changed optimization after synthesis
 invalidates synthesized state; a no-op does not. Placement and routing is legal
 only before mapping, synthesis is legal while the state is not synthesized, and
-termination is legal only after full target conformance. There is no retry
-suppression, pass-history feature, or budget reservation for later actions.
+termination is exposed after the action-derived state records mapping, routing,
+and synthesis. Core verifies actual target conformance before accepting
+termination. This preserves the trained MDP's phase transitions; the native
+analysis also reports factual phase state, but the current actor does not use it
+for masking. There is no retry suppression, pass-history feature, or budget
+reservation for later actions.
 
 The horizon is 20 total policy decisions, including `terminate`. Termination may
 succeed as the twentieth decision. A twentieth non-termination action truncates
@@ -74,11 +82,14 @@ returns the absolute expected fidelity; pass errors, timeouts, and truncation
 return zero. This is the terminal-only reward contract of #798, not the
 intermediate-reward change from later work.
 
-Expected fidelity is computed from the Qiskit target produced by the same IQM
-Garnet QDMI device snapshot as the Core compiler target. The reward adapter only
-mirrors a missing reverse CZ calibration needed for Core's legal orientation.
-ESP is not used because the Qiskit reward target does not expose the operation
-durations and qubit-coherence properties required by that metric.
+Expected fidelity is computed directly from the same Core `CompilerTarget`
+snapshot used for compilation. The target is populated by the QDMI device and
+contains operation defaults and per-site fidelities. Lookup prefers the exact
+ordered site tuple, permits a reverse-tuple fallback only for CZ, then uses the
+operation default. Measurement contributes to the product. This removes the
+intermediate and terminal Qiskit conversions. ESP remains out of scope because
+the native reward currently models only the calibrated operation-fidelity
+product, not scheduled durations and qubit-coherence decay.
 
 ## Policy ABI
 
@@ -240,7 +251,9 @@ zero return. The complete r5 report has SHA-256
 |       43 |        0.230175 |     70/85 |                     4.929 |
 
 Seed 19 won by validation return. Its deployed ONNX file has SHA-256
-`384c2a5ba98e9d415f46ad1f2703b25958f10ab93df4c1f9f2b551280e64d4c4`.
+`b13f70516940408fda5e2b1ed806a735161b21f57fbda5a54398f04da671c3a3`. Only its
+Core compatibility metadata changed; the trained graph and weights are
+unchanged.
 
 | Python split                    |   Policy | Canonical Core | Fixed staged | Policy successes |
 | ------------------------------- | -------: | -------------: | -----------: | ---------------: |

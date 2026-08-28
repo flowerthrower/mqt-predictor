@@ -19,6 +19,9 @@
 
 namespace mlir {
 class CompilerTarget;
+namespace qco {
+class QCOCircuitAnalysis;
+} // namespace qco
 } // namespace mlir
 
 namespace mqt::predictor::compiler {
@@ -41,11 +44,16 @@ struct CircuitAnalysis {
 /**
  * Analyze a straight-line scalar QCO entry point.
  *
- * Tensor-backed qubit registers and quantum control flow deliberately return
- * failure in schema v3. The predictor pass then uses the canonical Core
- * pipeline as its safe fallback.
+ * Static one-dimensional tensor registers are supported. Quantum control flow
+ * and dynamic tensor indexing return failure in schema v3; the predictor pass
+ * then uses the canonical Core pipeline as its safe fallback.
  */
 [[nodiscard]] ::mlir::FailureOr<CircuitAnalysis>
 analyzeCircuit(::mlir::ModuleOp module, const ::mlir::CompilerTarget& target);
+
+/** Materialize Predictor features from Core's cached QCO analysis. */
+[[nodiscard]] ::mlir::FailureOr<CircuitAnalysis>
+analyzeCircuit(const ::mlir::qco::QCOCircuitAnalysis& analysis,
+               const ::mlir::CompilerTarget& target);
 
 } // namespace mqt::predictor::compiler

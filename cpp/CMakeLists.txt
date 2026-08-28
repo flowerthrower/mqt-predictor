@@ -184,7 +184,7 @@ if(BUILD_TESTING)
       mqt-predictor-iqm-garnet-onnx-model-e2e
       PROPERTIES
         PASS_REGULAR_EXPRESSION
-        "policy=model model_schema=mqt-predictor-onnx-policy/1.*sampling=stochastic sampling_seed=19.*action=terminate"
+        "policy=model model_schema=mqt-predictor-onnx-policy/1.*sampling=stochastic sampling_seed=19.*action=terminate.*terminal_expected_fidelity=9.231927e-01"
         FAIL_REGULAR_EXPRESSION "falling back;truncated;error:")
   endif()
 

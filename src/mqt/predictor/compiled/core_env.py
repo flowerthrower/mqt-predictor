@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import contextlib
-import copy
 import importlib
 import math
 import signal
@@ -24,8 +23,6 @@ import numpy as np
 from gymnasium import Env
 from gymnasium.spaces import Box, Dict, Discrete
 
-from mqt.predictor.reward import expected_fidelity
-
 from .policy import ACTION_NAMES, FEATURE_NAMES, MAX_STEPS, V3_OPERATION_NAMES
 
 if TYPE_CHECKING:
@@ -34,7 +31,6 @@ if TYPE_CHECKING:
 
     from numpy.typing import NDArray
     from qiskit import QuantumCircuit
-    from qiskit.transpiler import Target
 
 
 NUM_TRANSFORM_ACTIONS = len(ACTION_NAMES) - 1
@@ -48,8 +44,6 @@ class _QCProgram(Protocol):
     """Subset of the Core QC program API used by the environment."""
 
     def to_qco(self) -> _QCOProgram: ...
-
-    def to_qiskit(self, *, target: object | None = None) -> QuantumCircuit: ...
 
 
 class _QCOProgram(Protocol):
@@ -76,7 +70,40 @@ class _QCOProgram(Protocol):
 
     def verify_target_conformance(self, target: object) -> None: ...
 
-    def to_qc(self) -> _QCProgram: ...
+    def analyze_for_target(self, target: object) -> _QCOCircuitMetrics: ...
+
+    def expected_fidelity(self, target: object) -> float: ...
+
+
+class _QCOCircuitMetrics(Protocol):
+    """Owned Core analysis result consumed by the observation adapter."""
+
+    @property
+    def operation_counts(self) -> dict[str, int]: ...
+
+    @property
+    def total_operations(self) -> int: ...
+
+    @property
+    def num_qubits(self) -> int: ...
+
+    @property
+    def depth(self) -> int: ...
+
+    @property
+    def critical_depth(self) -> float: ...
+
+    @property
+    def entanglement_ratio(self) -> float: ...
+
+    @property
+    def parallelism(self) -> float: ...
+
+    @property
+    def liveness(self) -> float: ...
+
+    @property
+    def program_communication(self) -> float: ...
 
 
 class _QCProgramFactory(Protocol):
@@ -152,78 +179,6 @@ def _enforce_pass_timeout(pass_timeout: float | None) -> Iterator[None]:
             signal.setitimer(signal.ITIMER_REAL, remaining_delay, previous_interval)
 
 
-def _prepare_reward_target(target: Target) -> Target:
-    """Copy a Qiskit target and complete only symmetric CZ calibrations.
-
-    Core can reverse the operands of a CZ without changing the physical gate.
-    Qiskit's expected-fidelity lookup is ordered, so mirror an existing CZ
-    property only when the opposite ordering is absent. No other operation is
-    assumed to be swap invariant.
-    """
-    prepared = copy.deepcopy(target)
-    try:
-        properties = prepared["cz"]
-    except KeyError:
-        return prepared
-    for qargs, instruction_properties in tuple(properties.items()):
-        if qargs is None or len(qargs) != 2:
-            continue
-        reverse = (qargs[1], qargs[0])
-        if reverse not in properties:
-            properties[reverse] = instruction_properties
-    return prepared
-
-
-def _structural_features(
-    circuit: QuantumCircuit,
-) -> tuple[int, float, float, float, float, float]:
-    """Reproduce the straight-line feature scan used by the C++ runtime."""
-    num_qubits = circuit.num_qubits
-    states = [(0, 0)] * circuit.num_qubits
-    interactions: set[tuple[int, int]] = set()
-    num_gates = 0
-    num_two_qubit_gates = 0
-    activity = 0
-    maximum = (0, 0)
-
-    for instruction in circuit.data:
-        operation = instruction.operation
-        qubits = tuple(circuit.find_bit(qubit).index for qubit in instruction.qubits)
-        if operation.name == "barrier" or not qubits:
-            continue
-        if getattr(operation, "blocks", ()):
-            msg = "compiled policy features require straight-line circuits"
-            raise ValueError(msg)
-
-        prior = states[qubits[0]]
-        for qubit in qubits[1:]:
-            if states[qubit][0] > prior[0]:
-                prior = states[qubit]
-        if operation.name in {"measure", "reset"}:
-            next_state = (prior[0] + 1, prior[1])
-            activity += len(qubits)
-        else:
-            is_two_qubit = len(qubits) == 2
-            next_state = (prior[0] + 1, prior[1] + int(is_two_qubit))
-            num_gates += 1
-            num_two_qubit_gates += int(is_two_qubit)
-            activity += len(qubits)
-            if is_two_qubit:
-                interactions.add(tuple(sorted(qubits)))
-        for qubit in qubits:
-            states[qubit] = next_state
-        if next_state[0] >= maximum[0]:
-            maximum = next_state
-
-    depth, two_qubit_critical_depth = maximum
-    communication = 2 * len(interactions) / (num_qubits * (num_qubits - 1)) if num_qubits > 1 else 0.0
-    critical_depth = two_qubit_critical_depth / num_two_qubit_gates if num_two_qubit_gates else 0.0
-    entanglement_ratio = num_two_qubit_gates / num_gates if num_gates else 0.0
-    parallelism = max(((num_gates / depth) - 1) / (num_qubits - 1), 0.0) if num_qubits > 1 and depth else 0.0
-    liveness = activity / (num_qubits * depth) if num_qubits and depth else 0.0
-    return depth, communication, critical_depth, entanglement_ratio, parallelism, liveness
-
-
 class CorePredictorEnv(Env):
     """Order exposed Core QCO passes on one persistent compiler program."""
 
@@ -231,7 +186,6 @@ class CorePredictorEnv(Env):
         self,
         circuits: Sequence[QuantumCircuit],
         target: _CompilerTarget,
-        reward_target: Target,
         *,
         max_steps: int = MAX_STEPS,
         pass_timeout: float | None = None,
@@ -241,7 +195,6 @@ class CorePredictorEnv(Env):
         Args:
             circuits: Qiskit circuits sampled when an episode is reset.
             target: Core compiler target used for terminal compilation.
-            reward_target: Qiskit target carrying the same device calibrations.
             max_steps: Maximum number of actions, including termination, per episode.
             pass_timeout: Best-effort timeout in seconds for one Core pass.
 
@@ -255,9 +208,6 @@ class CorePredictorEnv(Env):
         if target.num_qubits <= 0:
             msg = "The Core compiler target must contain at least one qubit."
             raise ValueError(msg)
-        if reward_target.num_qubits != target.num_qubits:
-            msg = "The Core compiler target and Qiskit reward target must describe the same number of qubits."
-            raise ValueError(msg)
         if not 0 < max_steps <= MAX_STEPS:
             msg = f"max_steps must be between 1 and {MAX_STEPS}."
             raise ValueError(msg)
@@ -265,7 +215,6 @@ class CorePredictorEnv(Env):
         self._compiler = _load_core_compiler()
         self._circuits = tuple(circuit.copy() for circuit in circuits)
         self.target = target
-        self.reward_target = _prepare_reward_target(reward_target)
         self.max_steps = max_steps
         self.pass_timeout = pass_timeout
         self.action_space = Discrete(len(ACTION_NAMES))
@@ -308,38 +257,22 @@ class CorePredictorEnv(Env):
             raise ValueError(msg)
         self._pass_timeout = pass_timeout
 
-    def _as_qiskit(self, program: _QCOProgram, *, mapped: bool) -> QuantumCircuit:
-        qc_program = program.copy().to_qc()
-        return qc_program.to_qiskit(target=self.target if mapped else None)
-
     def _observation_for(
         self,
         program: _QCOProgram,
-        *,
-        mapped: bool,
     ) -> dict[str, NDArray[np.float32]]:
-        circuit = self._as_qiskit(program, mapped=mapped)
-        num_qubits = circuit.num_qubits
-        depth, communication, critical_depth, entanglement_ratio, parallelism, liveness = _structural_features(circuit)
-        operation_counts = dict.fromkeys(V3_OPERATION_NAMES, 0)
-        total_operations = 0
-        for instruction in circuit.data:
-            operation_name = instruction.operation.name
-            if operation_name == "barrier":
-                continue
-            total_operations += 1
-            if operation_name in operation_counts:
-                operation_counts[operation_name] += 1
-        denominator = max(total_operations, 1)
+        analysis = program.analyze_for_target(self.target)
+        operation_counts = analysis.operation_counts
+        denominator = max(analysis.total_operations, 1)
         v3_features = {
-            **{name: count / denominator for name, count in operation_counts.items()},
-            "critical_depth": critical_depth,
-            "depth": math.log1p(min(depth, DEPTH_NORMALIZATION_MAX)) / math.log1p(DEPTH_NORMALIZATION_MAX),
-            "entanglement_ratio": entanglement_ratio,
-            "liveness": liveness,
-            "num_qubits": num_qubits / self.target.num_qubits,
-            "parallelism": parallelism,
-            "program_communication": communication,
+            **{name: operation_counts.get(name, 0) / denominator for name in V3_OPERATION_NAMES},
+            "critical_depth": analysis.critical_depth,
+            "depth": math.log1p(min(analysis.depth, DEPTH_NORMALIZATION_MAX)) / math.log1p(DEPTH_NORMALIZATION_MAX),
+            "entanglement_ratio": analysis.entanglement_ratio,
+            "liveness": analysis.liveness,
+            "num_qubits": analysis.num_qubits / self.target.num_qubits,
+            "parallelism": analysis.parallelism,
+            "program_communication": analysis.program_communication,
         }
         return {name: np.clip(np.asarray([v3_features[name]], dtype=np.float32), 0.0, 1.0) for name in FEATURE_NAMES}
 
@@ -377,7 +310,7 @@ class CorePredictorEnv(Env):
         program = self._compiler.QCProgram.from_qiskit(circuit).to_qco()
         program.cleanup()
         program.decompose_multi_controlled()
-        observation = self._observation_for(program, mapped=False)
+        observation = self._observation_for(program)
 
         self._program = program
         self._mapped = False
@@ -451,10 +384,7 @@ class CorePredictorEnv(Env):
             candidate_synthesized = False
         elif action == SYNTHESIZE_ACTION:
             candidate_synthesized = True
-        observation = self._observation_for(
-            candidate,
-            mapped=candidate_mapped,
-        )
+        observation = self._observation_for(candidate)
         return (
             candidate,
             observation,
@@ -483,9 +413,8 @@ class CorePredictorEnv(Env):
             try:
                 with _enforce_pass_timeout(self.pass_timeout):
                     candidate.verify_target_conformance(self.target)
-                circuit = self._as_qiskit(candidate, mapped=True)
-                reward = expected_fidelity(circuit, self.reward_target)
-                observation = self._observation_for(candidate, mapped=True)
+                reward = candidate.expected_fidelity(self.target)
+                observation = self._observation_for(candidate)
             except Exception as error:  # ruff:ignore[blind-except]
                 return self._failed_step(error)
             self._program = candidate

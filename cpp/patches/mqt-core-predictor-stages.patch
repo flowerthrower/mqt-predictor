@@ -1,8 +1,73 @@
 diff --git a/bindings/mlir/register_mlir.cpp b/bindings/mlir/register_mlir.cpp
-index d66689f..177b938 100644
+index 4a4b664..13dd23b 100644
 --- a/bindings/mlir/register_mlir.cpp
 +++ b/bindings/mlir/register_mlir.cpp
-@@ -797,6 +797,10 @@ operations.)pb");
+@@ -9,6 +9,7 @@
+  */
+
+ #include "mlir/Compiler/Programs.h"
++#include "mlir/Compiler/QCOAnalysis.h"
+ #include "mlir/Compiler/QDMIAdapter.h"
+ #include "mlir/Compiler/Target.h"
+ #include "qdmi/Client.hpp"
+@@ -761,6 +762,56 @@ is counted. Operations in every structured control-flow region are counted
+ once, regardless of how often the region executes. Operations within modifiers
+ are not counted recursively, and barriers are skipped.)pb");
+
++  nb::class_<mlir::qco::QCOCircuitMetrics>(
++      m, "QCOCircuitMetrics",
++      "Owned target-relative metrics for a straight-line QCO circuit.")
++      .def_prop_ro(
++          "operation_counts",
++          [](const mlir::qco::QCOCircuitMetrics& metrics) {
++            nb::dict result;
++            for (const auto& [name, count] : metrics.operationCounts) {
++              result[nb::str(name.c_str())] = count;
++            }
++            return result;
++          },
++          "Canonical operation counts in the circuit.")
++      .def_ro("total_operations",
++              &mlir::qco::QCOCircuitMetrics::totalOperations,
++              "The non-barrier operation count.")
++      .def_ro("num_qubits", &mlir::qco::QCOCircuitMetrics::numQubits,
++              "The target-effective qubit count.")
++      .def_ro("depth", &mlir::qco::QCOCircuitMetrics::depth,
++              "The circuit depth.")
++      .def_ro("two_qubit_depth", &mlir::qco::QCOCircuitMetrics::twoQubitDepth,
++              "The two-qubit depth along the critical path.")
++      .def_ro("num_gates", &mlir::qco::QCOCircuitMetrics::numGates,
++              "The unitary gate count.")
++      .def_ro("num_two_qubit_gates",
++              &mlir::qco::QCOCircuitMetrics::numTwoQubitGates,
++              "The two-qubit unitary gate count.")
++      .def_ro("program_communication",
++              &mlir::qco::QCOCircuitMetrics::programCommunication,
++              "The normalized logical interaction density.")
++      .def_ro("critical_depth", &mlir::qco::QCOCircuitMetrics::criticalDepth,
++              "The fraction of two-qubit gates on the critical path.")
++      .def_ro("entanglement_ratio",
++              &mlir::qco::QCOCircuitMetrics::entanglementRatio,
++              "The fraction of unitary gates acting on two qubits.")
++      .def_ro("parallelism", &mlir::qco::QCOCircuitMetrics::parallelism,
++              "The normalized circuit parallelism.")
++      .def_ro("liveness", &mlir::qco::QCOCircuitMetrics::liveness,
++              "The average active-qubit fraction over circuit depth.")
++      .def_ro("mapped", &mlir::qco::QCOCircuitMetrics::mapped,
++              "Whether every qubit has a static target site.")
++      .def_ro("routed", &mlir::qco::QCOCircuitMetrics::routed,
++              "Whether every two-qubit gate acts on adjacent target sites.")
++      .def_ro("synthesized", &mlir::qco::QCOCircuitMetrics::synthesized,
++              "Whether every operation is native to the target.")
++      .def_ro("has_wide_unitary", &mlir::qco::QCOCircuitMetrics::hasWideUnitary,
++              "Whether the circuit contains a unitary wider than two qubits.")
++      .def_ro("fully_unmapped", &mlir::qco::QCOCircuitMetrics::fullyUnmapped,
++              "Whether every qubit originates from a dynamic allocation.");
++
+   auto qcoProgram = nb::class_<mlir::QCOProgram, mlir::Program>(
+       m, "QCOProgram", R"pb(A compiler program in the QCO dialect.
+
+@@ -798,6 +849,10 @@ operations.)pb");
                &mlir::QCOProgram::fuseSingleQubitUnitaryRuns>::call,
            nb::kw_only(), "basis"_a = "zyz",
            "Fuse single-qubit unitary runs into the chosen decomposition basis.")
@@ -13,7 +78,7 @@ index d66689f..177b938 100644
        .def("unroll_quantum_loops",
             &BooleanMemberAdapter<&mlir::QCOProgram::unrollQuantumLoops>::call,
             nb::kw_only(), "unroll_factor"_a = -1,
-@@ -818,6 +822,19 @@ operations.)pb");
+@@ -819,6 +874,49 @@ operations.)pb");
             "Decompose controlled X/Z/SWAP gates, qco.rccx, and constant-angle "
             "phase gates that act on at least min_qubits qubits (min_qubits "
             "must be at least 3; default 3 means wider than two-qubit).")
@@ -30,6 +95,36 @@ index d66689f..177b938 100644
 +           &BooleanMemberAdapter<
 +               &mlir::QCOProgram::verifyTargetConformance>::call,
 +           "target"_a, "Verify that this program conforms to the target.")
++      .def(
++          "analyze_for_target",
++          [](const mlir::QCOProgram& value,
++             const mlir::CompilerTarget& target) {
++            requireValid(value);
++            auto result =
++                mlir::qco::QCOCircuitAnalysis(value.module()).forTarget(target);
++            if (failed(result)) {
++              throw std::runtime_error(
++                  "QCO circuit analysis requires a supported straight-line "
++                  "program.");
++            }
++            return *std::move(result);
++          },
++          "target"_a, "Analyze this straight-line QCO program for the target.")
++      .def(
++          "expected_fidelity",
++          [](const mlir::QCOProgram& value,
++             const mlir::CompilerTarget& target) {
++            requireValid(value);
++            auto result = mlir::qco::QCOCircuitAnalysis(value.module())
++                              .expectedFidelity(target);
++            if (failed(result)) {
++              throw std::runtime_error(
++                  "Expected fidelity requires a mapped circuit with complete "
++                  "target calibration data.");
++            }
++            return *result;
++          },
++          "target"_a, "Compute expected fidelity from target calibration data.")
        .def("compile_for_target",
             &BooleanMemberAdapter<&mlir::QCOProgram::compileForTarget>::call,
             "target"_a, nb::kw_only(), "enable_timing"_a = false,
@@ -63,8 +158,119 @@ index 8b5f725..c621d4c 100644
    /// Compile this program for a target in place.
    ///
    /// Do not rely on the program contents if compilation fails.
+diff --git a/mlir/include/mlir/Compiler/QCOAnalysis.h b/mlir/include/mlir/Compiler/QCOAnalysis.h
+new file mode 100644
+index 0000000..aec02cf
+--- /dev/null
++++ b/mlir/include/mlir/Compiler/QCOAnalysis.h
+@@ -0,0 +1,85 @@
++/*
++ * Copyright (c) 2023 - 2026 Chair for Design Automation, TUM
++ * Copyright (c) 2025 - 2026 Munich Quantum Software Company GmbH
++ * All rights reserved.
++ *
++ * SPDX-License-Identifier: MIT
++ *
++ * Licensed under the MIT License
++ */
++
++#pragma once
++
++#include <mlir/IR/BuiltinOps.h>
++#include <mlir/Support/LogicalResult.h>
++
++#include <cstddef>
++#include <memory>
++#include <string>
++#include <utility>
++#include <vector>
++
++namespace mlir {
++
++class CompilerTarget;
++
++namespace qco {
++
++namespace detail {
++struct QCOCircuitStatistics;
++} // namespace detail
++
++/**
++ * @brief Target-relative metrics for a straight-line QCO circuit.
++ */
++struct QCOCircuitMetrics {
++  std::vector<std::pair<std::string, size_t>> operationCounts;
++  size_t totalOperations = 0;
++  size_t numQubits = 0;
++  size_t depth = 0;
++  size_t twoQubitDepth = 0;
++  size_t numGates = 0;
++  size_t numTwoQubitGates = 0;
++  double programCommunication = 0.;
++  double criticalDepth = 0.;
++  double entanglementRatio = 0.;
++  double parallelism = 0.;
++  double liveness = 0.;
++  bool mapped = false;
++  bool routed = false;
++  bool synthesized = false;
++  bool hasWideUnitary = false;
++  bool fullyUnmapped = false;
++};
++
++/**
++ * @brief Cached structural analysis of a straight-line QCO circuit.
++ *
++ * @details The constructor records target-independent circuit statistics.
++ * Materialization applies a compiler target without rescanning the IR. Normal
++ * MLIR analysis invalidation discards cached operation references after a
++ * transforming pass.
++ */
++class QCOCircuitAnalysis {
++public:
++  explicit QCOCircuitAnalysis(ModuleOp moduleOp);
++
++  /// Materialize target-relative circuit metrics.
++  [[nodiscard]] FailureOr<QCOCircuitMetrics>
++  forTarget(const CompilerTarget& target) const;
++
++  /**
++   * Compute the expected fidelity of a mapped, calibrated circuit.
++   *
++   * This deliberately remains separate from @ref forTarget so unavailable
++   * calibration data cannot prevent intermediate feature extraction.
++   */
++  [[nodiscard]] FailureOr<double>
++  expectedFidelity(const CompilerTarget& target) const;
++
++private:
++  std::shared_ptr<const detail::QCOCircuitStatistics> statistics_;
++};
++
++} // namespace qco
++} // namespace mlir
+diff --git a/mlir/lib/Compiler/CMakeLists.txt b/mlir/lib/Compiler/CMakeLists.txt
+index 08fa49c..0871567 100644
+--- a/mlir/lib/Compiler/CMakeLists.txt
++++ b/mlir/lib/Compiler/CMakeLists.txt
+@@ -50,6 +50,7 @@ add_mlir_library(
+   MQTCompilerPipeline
+   PARTIAL_SOURCES_INTENDED
+   Programs.cpp
++  QCOAnalysis.cpp
+   TargetCompilation.cpp
+   ADDITIONAL_HEADER_DIRS
+   ${MQT_MLIR_SOURCE_INCLUDE_DIR}/mlir/Compiler
+@@ -77,6 +78,7 @@ add_mlir_library(
+   MLIRLLVMToLLVMIRTranslation
+   MLIRMathDialect
+   MLIRMQTDialect
++  MLIRQTensorDialect
+   MQTCompilerTarget
+   MQT::MLIRSupport)
+
 diff --git a/mlir/lib/Compiler/Programs.cpp b/mlir/lib/Compiler/Programs.cpp
-index ca201c3..364f7c8 100644
+index dbbde47..8a5ab44 100644
 --- a/mlir/lib/Compiler/Programs.cpp
 +++ b/mlir/lib/Compiler/Programs.cpp
 @@ -27,6 +27,7 @@
@@ -135,8 +341,649 @@ index ca201c3..364f7c8 100644
  bool QCOProgram::compileForTarget(const CompilerTarget& target,
                                    const bool enableTiming,
                                    const bool enableStatistics) {
+diff --git a/mlir/lib/Compiler/QCOAnalysis.cpp b/mlir/lib/Compiler/QCOAnalysis.cpp
+new file mode 100644
+index 0000000..9990aa6
+--- /dev/null
++++ b/mlir/lib/Compiler/QCOAnalysis.cpp
+@@ -0,0 +1,635 @@
++/*
++ * Copyright (c) 2023 - 2026 Chair for Design Automation, TUM
++ * Copyright (c) 2025 - 2026 Munich Quantum Software Company GmbH
++ * All rights reserved.
++ *
++ * SPDX-License-Identifier: MIT
++ *
++ * Licensed under the MIT License
++ */
++
++#include "mlir/Compiler/QCOAnalysis.h"
++
++#include "mlir/Compiler/Target.h"
++#include "mlir/Dialect/MQT/IR/MQTDialect.h"
++#include "mlir/Dialect/QCO/IR/QCOInterfaces.h"
++#include "mlir/Dialect/QCO/IR/QCOOps.h"
++#include "mlir/Dialect/QCO/QCOUtils.h"
++#include "mlir/Dialect/QTensor/IR/QTensorOps.h"
++
++#include <llvm/ADT/DenseMap.h>
++#include <llvm/ADT/STLExtras.h>
++#include <llvm/ADT/SmallVector.h>
++#include <llvm/ADT/StringMap.h>
++#include <llvm/ADT/StringRef.h>
++#include <mlir/Dialect/Utils/StaticValueUtils.h>
++#include <mlir/IR/BuiltinTypes.h>
++#include <mlir/IR/Operation.h>
++
++#include <algorithm>
++#include <cmath>
++#include <cstddef>
++#include <memory>
++#include <optional>
++#include <set>
++#include <string>
++#include <utility>
++#include <vector>
++
++namespace mlir::qco {
++namespace {
++
++using SiteId = CompilerTarget::SiteId;
++
++struct WireState {
++  size_t logical = 0;
++  std::optional<SiteId> site;
++  size_t depth = 0;
++  size_t twoQubitCriticalDepth = 0;
++};
++
++struct ScoredOperation {
++  Operation* operation = nullptr;
++  std::string name;
++  size_t numQubits = 0;
++  size_t numParameters = 0;
++  SmallVector<std::optional<SiteId>, 2> sites;
++};
++
++[[nodiscard]] bool usesLinearQubit(Operation& operation) {
++  const auto isQubit = [](Value value) {
++    return isLinearQubitType(value.getType());
++  };
++  return llvm::any_of(operation.getOperands(), isQubit) ||
++         llvm::any_of(operation.getResults(), isQubit);
++}
++
++[[nodiscard]] std::optional<llvm::StringRef>
++canonicalOperationName(UnitaryOpInterface unitary) {
++  auto controlled = dyn_cast<CtrlOp>(unitary.getOperation());
++  if (!controlled) {
++    return unitary.getBaseSymbol();
++  }
++  if (controlled.getNumBodyUnitaries() != 1) {
++    return std::nullopt;
++  }
++
++  auto body = controlled.getBodyUnitary(0);
++  const auto base = body.getBaseSymbol();
++  const auto controls = controlled.getNumControls();
++  const auto targets = controlled.getNumTargets();
++  if (controls == 1) {
++    if (targets == 2 && base == "swap") {
++      return "cswap";
++    }
++    if (targets != 1) {
++      return std::nullopt;
++    }
++    if (base == "x") {
++      return "cx";
++    }
++    if (base == "y") {
++      return "cy";
++    }
++    if (base == "z") {
++      return "cz";
++    }
++    if (base == "h") {
++      return "ch";
++    }
++    if (base == "p") {
++      return "cp";
++    }
++    if (base == "rx") {
++      return "crx";
++    }
++    if (base == "ry") {
++      return "cry";
++    }
++    if (base == "rz") {
++      return "crz";
++    }
++    if (base == "sx") {
++      return "csx";
++    }
++    if (base == "u") {
++      return "cu3";
++    }
++    return std::nullopt;
++  }
++  if (targets != 1 || base != "x") {
++    return std::nullopt;
++  }
++  if (controls == 2) {
++    return "ccx";
++  }
++  if (controls == 3) {
++    return "c3x";
++  }
++  if (controls == 4) {
++    return "c4x";
++  }
++  return std::nullopt;
++}
++
++[[nodiscard]] bool sameSites(llvm::ArrayRef<SiteId> lhs,
++                             llvm::ArrayRef<SiteId> rhs) {
++  return lhs.size() == rhs.size() && llvm::equal(lhs, rhs);
++}
++
++[[nodiscard]] std::optional<double>
++operationFidelity(const CompilerTarget& target, const ScoredOperation& scored) {
++  SmallVector<SiteId, 2> sites;
++  sites.reserve(scored.sites.size());
++  for (const auto site : scored.sites) {
++    if (!site) {
++      return std::nullopt;
++    }
++    sites.emplace_back(*site);
++  }
++
++  SmallVector<const CompilerTarget::Operation*> capabilities;
++  for (const auto& operation : target.operations()) {
++    if (operation.canonicalName() == scored.name &&
++        operation.numQubits() == scored.numQubits &&
++        operation.numParameters() == scored.numParameters) {
++      capabilities.emplace_back(&operation);
++    }
++  }
++
++  const auto tupleFidelity = [&](llvm::ArrayRef<SiteId> requested) {
++    for (const auto* capability : capabilities) {
++      const auto tuple =
++          llvm::find_if(capability->siteTuples(),
++                        [&](const CompilerTarget::SiteTuple& candidate) {
++                          return sameSites(candidate.sites(), requested);
++                        });
++      if (tuple != capability->siteTuples().end()) {
++        if (const auto fidelity = tuple->fidelity()) {
++          return fidelity;
++        }
++      }
++    }
++    return std::optional<double>{};
++  };
++  if (const auto fidelity = tupleFidelity(sites)) {
++    return fidelity;
++  }
++
++  if (scored.name == "cz" && sites.size() == 2) {
++    std::ranges::reverse(sites);
++    if (const auto fidelity = tupleFidelity(sites)) {
++      return fidelity;
++    }
++  }
++  for (const auto* capability : capabilities) {
++    if (const auto fidelity = capability->fidelity()) {
++      return fidelity;
++    }
++  }
++  return std::nullopt;
++}
++
++} // namespace
++
++namespace detail {
++
++struct QCOCircuitStatistics {
++  bool valid = false;
++  size_t numQubits = 0;
++  size_t dynamicRoots = 0;
++  size_t staticRoots = 0;
++  size_t depth = 0;
++  size_t twoQubitDepth = 0;
++  size_t numGates = 0;
++  size_t numTwoQubitGates = 0;
++  size_t totalOperations = 0;
++  size_t activity = 0;
++  bool hasWideUnitary = false;
++  llvm::StringMap<size_t> operationCounts;
++  std::set<std::pair<size_t, size_t>> logicalInteractions;
++  std::set<SiteId> staticSites;
++  std::vector<std::pair<SiteId, SiteId>> physicalInteractions;
++  std::vector<ScoredOperation> scoredOperations;
++};
++
++} // namespace detail
++
++namespace {
++
++[[nodiscard]] std::shared_ptr<const detail::QCOCircuitStatistics>
++scanCircuit(ModuleOp moduleOp) {
++  auto statistics = std::make_shared<detail::QCOCircuitStatistics>();
++  auto entry = mqt::getEntryPoint(moduleOp);
++  if (!entry || !entry.getBody().hasOneBlock() ||
++      llvm::any_of(entry.getArgumentTypes(), isLinearQubitType)) {
++    return statistics;
++  }
++
++  llvm::DenseMap<Value, WireState> wires;
++  using TensorState = SmallVector<std::optional<WireState>>;
++  llvm::DenseMap<Value, TensorState> tensors;
++  size_t nextLogical = 0;
++
++  const auto recordDepth = [&](const WireState& wire) {
++    if (wire.depth >= statistics->depth) {
++      statistics->depth = wire.depth;
++      statistics->twoQubitDepth = wire.twoQubitCriticalDepth;
++    }
++  };
++  const auto advanceWire = [&](Value input, Value output, bool isTwoQubit,
++                               size_t operationDepth,
++                               size_t operationCriticalDepth) {
++    const auto found = wires.find(input);
++    if (found == wires.end()) {
++      return false;
++    }
++    auto next = found->second;
++    wires.erase(found);
++    next.depth = operationDepth;
++    next.twoQubitCriticalDepth =
++        operationCriticalDepth + static_cast<size_t>(isTwoQubit);
++    wires[output] = next;
++    recordDepth(next);
++    return true;
++  };
++
++  for (Operation& operation : entry.getBody().front()) {
++    if (auto alloc = dyn_cast<AllocOp>(operation)) {
++      wires[alloc.getResult()] = WireState{.logical = nextLogical++};
++      ++statistics->dynamicRoots;
++      continue;
++    }
++    if (auto staticQubit = dyn_cast<StaticOp>(operation)) {
++      const auto site = static_cast<SiteId>(staticQubit.getIndex());
++      if (!statistics->staticSites.insert(site).second) {
++        return statistics;
++      }
++      wires[staticQubit.getQubit()] =
++          WireState{.logical = nextLogical++, .site = site};
++      ++statistics->staticRoots;
++      continue;
++    }
++    if (auto alloc = dyn_cast<qtensor::AllocOp>(operation)) {
++      const auto type = dyn_cast<RankedTensorType>(alloc.getResult().getType());
++      if (!type || !type.hasStaticShape() || type.getRank() != 1) {
++        return statistics;
++      }
++      const auto size = static_cast<size_t>(type.getDimSize(0));
++      TensorState tensor(size);
++      for (auto& wire : tensor) {
++        wire = WireState{.logical = nextLogical++};
++      }
++      tensors[alloc.getResult()] = std::move(tensor);
++      statistics->dynamicRoots += size;
++      continue;
++    }
++    if (auto fromElements = dyn_cast<qtensor::FromElementsOp>(operation)) {
++      TensorState tensor;
++      tensor.reserve(fromElements.getElements().size());
++      for (auto element : fromElements.getElements()) {
++        const auto found = wires.find(element);
++        if (found == wires.end()) {
++          return statistics;
++        }
++        tensor.emplace_back(found->second);
++        wires.erase(found);
++      }
++      tensors[fromElements.getResult()] = std::move(tensor);
++      continue;
++    }
++    if (auto extract = dyn_cast<qtensor::ExtractOp>(operation)) {
++      const auto index = getConstantIntValue(extract.getIndex());
++      const auto found = tensors.find(extract.getTensor());
++      if (!index || *index < 0 || found == tensors.end() ||
++          std::cmp_greater_equal(*index, found->second.size())) {
++        return statistics;
++      }
++      auto tensor = std::move(found->second);
++      tensors.erase(found);
++      auto& wire = tensor[static_cast<size_t>(*index)];
++      if (!wire) {
++        return statistics;
++      }
++      wires[extract.getResult()] = *wire;
++      wire.reset();
++      tensors[extract.getOutTensor()] = std::move(tensor);
++      continue;
++    }
++    if (auto insert = dyn_cast<qtensor::InsertOp>(operation)) {
++      const auto index = getConstantIntValue(insert.getIndex());
++      const auto tensorFound = tensors.find(insert.getDest());
++      const auto wireFound = wires.find(insert.getScalar());
++      if (!index || *index < 0 || tensorFound == tensors.end() ||
++          wireFound == wires.end() ||
++          std::cmp_greater_equal(*index, tensorFound->second.size())) {
++        return statistics;
++      }
++      auto tensor = std::move(tensorFound->second);
++      tensors.erase(tensorFound);
++      auto& slot = tensor[static_cast<size_t>(*index)];
++      if (slot) {
++        return statistics;
++      }
++      slot = wireFound->second;
++      wires.erase(wireFound);
++      tensors[insert.getResult()] = std::move(tensor);
++      continue;
++    }
++    if (auto dealloc = dyn_cast<qtensor::DeallocOp>(operation)) {
++      const auto found = tensors.find(dealloc.getTensor());
++      if (found == tensors.end()) {
++        return statistics;
++      }
++      tensors.erase(found);
++      continue;
++    }
++    if (auto sink = dyn_cast<SinkOp>(operation)) {
++      const auto found = wires.find(sink.getQubit());
++      if (found == wires.end()) {
++        return statistics;
++      }
++      wires.erase(found);
++      continue;
++    }
++
++    if (auto unitary = dyn_cast<UnitaryOpInterface>(operation)) {
++      if (isa<BarrierOp, GPhaseOp>(operation)) {
++        for (auto [input, output] : llvm::zip_equal(
++                 unitary.getInputQubits(), unitary.getOutputQubits())) {
++          const auto found = wires.find(input);
++          if (found == wires.end()) {
++            return statistics;
++          }
++          const auto next = found->second;
++          wires.erase(found);
++          wires[output] = next;
++        }
++        continue;
++      }
++
++      ++statistics->totalOperations;
++      const auto operationName = canonicalOperationName(unitary);
++      if (operationName) {
++        ++statistics->operationCounts[*operationName];
++      }
++
++      const auto arity = unitary.getNumQubits();
++      if (arity == 0 || operation.getNumRegions() > 1) {
++        return statistics;
++      }
++
++      auto numParameters = unitary.getNumParams();
++      if (auto controlled = dyn_cast<CtrlOp>(operation);
++          controlled && controlled.getNumBodyUnitaries() == 1) {
++        numParameters = controlled.getBodyUnitary(0).getNumParams();
++      }
++
++      size_t operationDepth = 0;
++      size_t operationCriticalDepth = 0;
++      ScoredOperation scored{.operation = &operation,
++                             .name = operationName ? operationName->str() : "",
++                             .numQubits = arity,
++                             .numParameters = numParameters};
++      scored.sites.reserve(arity);
++      for (auto input : unitary.getInputQubits()) {
++        const auto found = wires.find(input);
++        if (found == wires.end()) {
++          return statistics;
++        }
++        scored.sites.emplace_back(found->second.site);
++        if (found->second.depth > operationDepth) {
++          operationDepth = found->second.depth;
++          operationCriticalDepth = found->second.twoQubitCriticalDepth;
++        }
++      }
++      ++operationDepth;
++
++      const auto isTwoQubit = arity == 2;
++      statistics->hasWideUnitary |= arity > 2;
++      ++statistics->numGates;
++      statistics->numTwoQubitGates += static_cast<size_t>(isTwoQubit);
++      statistics->activity += arity;
++
++      if (isTwoQubit) {
++        const auto first = wires.find(unitary.getInputQubit(0));
++        const auto second = wires.find(unitary.getInputQubit(1));
++        if (first == wires.end() || second == wires.end()) {
++          return statistics;
++        }
++        const auto edge =
++            std::minmax(first->second.logical, second->second.logical);
++        statistics->logicalInteractions.emplace(edge.first, edge.second);
++        if (first->second.site && second->second.site) {
++          statistics->physicalInteractions.emplace_back(*first->second.site,
++                                                        *second->second.site);
++        }
++      }
++      statistics->scoredOperations.emplace_back(std::move(scored));
++
++      for (auto [input, output] : llvm::zip_equal(unitary.getInputQubits(),
++                                                  unitary.getOutputQubits())) {
++        if (!advanceWire(input, output, isTwoQubit, operationDepth,
++                         operationCriticalDepth)) {
++          return statistics;
++        }
++      }
++      continue;
++    }
++
++    if (auto measure = dyn_cast<MeasureOp>(operation)) {
++      const auto found = wires.find(measure.getQubitIn());
++      if (found == wires.end()) {
++        return statistics;
++      }
++      ++statistics->totalOperations;
++      ++statistics->operationCounts["measure"];
++      ++statistics->activity;
++      statistics->scoredOperations.emplace_back(ScoredOperation{
++          .operation = &operation,
++          .name = "measure",
++          .numQubits = 1,
++          .numParameters = 0,
++          .sites = {found->second.site},
++      });
++      if (!advanceWire(measure.getQubitIn(), measure.getQubitOut(), false,
++                       found->second.depth + 1,
++                       found->second.twoQubitCriticalDepth)) {
++        return statistics;
++      }
++      continue;
++    }
++
++    if (auto reset = dyn_cast<ResetOp>(operation)) {
++      const auto found = wires.find(reset.getQubitIn());
++      if (found == wires.end()) {
++        return statistics;
++      }
++      ++statistics->totalOperations;
++      ++statistics->operationCounts["reset"];
++      ++statistics->activity;
++      statistics->scoredOperations.emplace_back(ScoredOperation{
++          .operation = &operation,
++          .name = "reset",
++          .numQubits = 1,
++          .numParameters = 0,
++          .sites = {found->second.site},
++      });
++      if (!advanceWire(reset.getQubitIn(), reset.getQubitOut(), false,
++                       found->second.depth + 1,
++                       found->second.twoQubitCriticalDepth)) {
++        return statistics;
++      }
++      continue;
++    }
++
++    if (operation.getNumRegions() != 0 || usesLinearQubit(operation)) {
++      return statistics;
++    }
++  }
++
++  if (!wires.empty() || !tensors.empty() || nextLogical == 0) {
++    return statistics;
++  }
++  statistics->numQubits = nextLogical;
++  statistics->valid = true;
++  return statistics;
++}
++
++} // namespace
++
++QCOCircuitAnalysis::QCOCircuitAnalysis(ModuleOp moduleOp)
++    : statistics_(scanCircuit(moduleOp)) {}
++
++FailureOr<QCOCircuitMetrics>
++QCOCircuitAnalysis::forTarget(const CompilerTarget& target) const {
++  if (!statistics_->valid ||
++      llvm::any_of(statistics_->staticSites, [&](SiteId site) {
++        return !target.vertexForSite(site).has_value();
++      })) {
++    return failure();
++  }
++
++  const auto mapped = statistics_->dynamicRoots == 0 &&
++                      statistics_->staticRoots == statistics_->numQubits;
++  const auto featureQubits =
++      mapped ? target.numQubits() : statistics_->numQubits;
++  if (featureQubits == 0) {
++    return failure();
++  }
++
++  auto routed = mapped;
++  for (const auto [firstSite, secondSite] : statistics_->physicalInteractions) {
++    const auto first = target.vertexForSite(firstSite);
++    const auto second = target.vertexForSite(secondSite);
++    routed &= first && second && target.areAdjacent(*first, *second);
++  }
++  const auto synthesized = llvm::all_of(
++      statistics_->scoredOperations, [&](const ScoredOperation& operation) {
++        return target.supports(operation.operation);
++      });
++
++  const auto communication =
++      featureQubits > 1
++          ? (2. *
++             static_cast<double>(statistics_->logicalInteractions.size())) /
++                (static_cast<double>(featureQubits) *
++                 static_cast<double>(featureQubits - 1))
++          : 0.;
++  const auto criticalDepth =
++      statistics_->numTwoQubitGates > 0
++          ? static_cast<double>(statistics_->twoQubitDepth) /
++                static_cast<double>(statistics_->numTwoQubitGates)
++          : 0.;
++  const auto entanglement =
++      statistics_->numGates > 0
++          ? static_cast<double>(statistics_->numTwoQubitGates) /
++                static_cast<double>(statistics_->numGates)
++          : 0.;
++  const auto parallelism =
++      featureQubits > 1 && statistics_->depth > 0
++          ? std::max(((static_cast<double>(statistics_->numGates) /
++                       static_cast<double>(statistics_->depth)) -
++                      1.) /
++                         static_cast<double>(featureQubits - 1),
++                     0.)
++          : 0.;
++  const auto liveness = statistics_->depth > 0
++                            ? static_cast<double>(statistics_->activity) /
++                                  (static_cast<double>(featureQubits) *
++                                   static_cast<double>(statistics_->depth))
++                            : 0.;
++
++  std::vector<std::pair<std::string, size_t>> operationCounts;
++  operationCounts.reserve(statistics_->operationCounts.size());
++  for (const auto& operation : statistics_->operationCounts) {
++    operationCounts.emplace_back(operation.getKey().str(),
++                                 operation.getValue());
++  }
++  std::ranges::sort(operationCounts, {},
++                    &decltype(operationCounts)::value_type::first);
++
++  return QCOCircuitMetrics{
++      .operationCounts = std::move(operationCounts),
++      .totalOperations = statistics_->totalOperations,
++      .numQubits = featureQubits,
++      .depth = statistics_->depth,
++      .twoQubitDepth = statistics_->twoQubitDepth,
++      .numGates = statistics_->numGates,
++      .numTwoQubitGates = statistics_->numTwoQubitGates,
++      .programCommunication = communication,
++      .criticalDepth = criticalDepth,
++      .entanglementRatio = entanglement,
++      .parallelism = parallelism,
++      .liveness = liveness,
++      .mapped = mapped,
++      .routed = routed,
++      .synthesized = synthesized,
++      .hasWideUnitary = statistics_->hasWideUnitary,
++      .fullyUnmapped = statistics_->dynamicRoots == statistics_->numQubits,
++  };
++}
++
++FailureOr<double>
++QCOCircuitAnalysis::expectedFidelity(const CompilerTarget& target) const {
++  if (!statistics_->valid || statistics_->dynamicRoots != 0 ||
++      statistics_->staticRoots != statistics_->numQubits ||
++      llvm::any_of(statistics_->staticSites, [&](SiteId site) {
++        return !target.vertexForSite(site).has_value();
++      })) {
++    return failure();
++  }
++
++  double fidelity = 1.;
++  for (const auto& scored : statistics_->scoredOperations) {
++    if ((scored.numQubits != 1 && scored.numQubits != 2) ||
++        scored.name.empty()) {
++      return failure();
++    }
++    SmallVector<size_t, 2> vertices;
++    vertices.reserve(scored.sites.size());
++    for (const auto site : scored.sites) {
++      if (!site) {
++        return failure();
++      }
++      const auto vertex = target.vertexForSite(*site);
++      if (!vertex) {
++        return failure();
++      }
++      vertices.emplace_back(*vertex);
++    }
++    if (vertices.size() == 2 && !target.areAdjacent(vertices[0], vertices[1])) {
++      return failure();
++    }
++    const auto operation = operationFidelity(target, scored);
++    if (!operation) {
++      return failure();
++    }
++    fidelity *= 1. - (1. - *operation);
++  }
++
++  constexpr double precision = 10'000'000'000.;
++  return std::nearbyint(fidelity * precision) / precision;
++}
++
++} // namespace mlir::qco
 diff --git a/mlir/lib/Dialect/QCO/Transforms/Mapping/Mapping.cpp b/mlir/lib/Dialect/QCO/Transforms/Mapping/Mapping.cpp
-index ef37256..25b6757 100644
+index 08279be..b53879d 100644
 --- a/mlir/lib/Dialect/QCO/Transforms/Mapping/Mapping.cpp
 +++ b/mlir/lib/Dialect/QCO/Transforms/Mapping/Mapping.cpp
 @@ -1066,7 +1066,18 @@ private:
@@ -160,10 +1007,88 @@ index ef37256..25b6757 100644
                const auto i0 = indices[0];
                const auto i1 = indices[1];
 diff --git a/python/mqt/core/mlir.pyi b/python/mqt/core/mlir.pyi
-index cd6e768..ce358ca 100644
+index cd6e768..c61cc02 100644
 --- a/python/mqt/core/mlir.pyi
 +++ b/python/mqt/core/mlir.pyi
-@@ -439,6 +439,9 @@ class QCOProgram(Program):
+@@ -406,6 +406,77 @@ class QCProgram(Program):
+         are not counted recursively, and barriers are skipped.
+         """
+
++class QCOCircuitMetrics:
++    """Owned target-relative metrics for a straight-line QCO circuit."""
++
++    @property
++    def operation_counts(self) -> dict:
++        """Canonical operation counts in the circuit."""
++
++    @property
++    def total_operations(self) -> int:
++        """The non-barrier operation count."""
++
++    @property
++    def num_qubits(self) -> int:
++        """The target-effective qubit count."""
++
++    @property
++    def depth(self) -> int:
++        """The circuit depth."""
++
++    @property
++    def two_qubit_depth(self) -> int:
++        """The two-qubit depth along the critical path."""
++
++    @property
++    def num_gates(self) -> int:
++        """The unitary gate count."""
++
++    @property
++    def num_two_qubit_gates(self) -> int:
++        """The two-qubit unitary gate count."""
++
++    @property
++    def program_communication(self) -> float:
++        """The normalized logical interaction density."""
++
++    @property
++    def critical_depth(self) -> float:
++        """The fraction of two-qubit gates on the critical path."""
++
++    @property
++    def entanglement_ratio(self) -> float:
++        """The fraction of unitary gates acting on two qubits."""
++
++    @property
++    def parallelism(self) -> float:
++        """The normalized circuit parallelism."""
++
++    @property
++    def liveness(self) -> float:
++        """The average active-qubit fraction over circuit depth."""
++
++    @property
++    def mapped(self) -> bool:
++        """Whether every qubit has a static target site."""
++
++    @property
++    def routed(self) -> bool:
++        """Whether every two-qubit gate acts on adjacent target sites."""
++
++    @property
++    def synthesized(self) -> bool:
++        """Whether every operation is native to the target."""
++
++    @property
++    def has_wide_unitary(self) -> bool:
++        """Whether the circuit contains a unitary wider than two qubits."""
++
++    @property
++    def fully_unmapped(self) -> bool:
++        """Whether every qubit originates from a dynamic allocation."""
++
+ class QCOProgram(Program):
+     """A compiler program in the QCO dialect.
+
+@@ -439,6 +510,9 @@ class QCOProgram(Program):
      def fuse_single_qubit_unitary_runs(self, *, basis: str = "zyz") -> None:
          """Fuse single-qubit unitary runs into the chosen decomposition basis."""
 
@@ -173,7 +1098,7 @@ index cd6e768..ce358ca 100644
      def unroll_quantum_loops(self, *, unroll_factor: int = -1) -> None:
          """Unroll quantum loops, optionally using a maximum unroll factor."""
 
-@@ -454,6 +457,15 @@ class QCOProgram(Program):
+@@ -454,6 +528,21 @@ class QCOProgram(Program):
      def decompose_multi_controlled(self, *, min_qubits: int = 3) -> None:
          """Decompose controlled X/Z/SWAP gates, qco.rccx, and constant-angle phase gates that act on at least min_qubits qubits (min_qubits must be at least 3; default 3 means wider than two-qubit)."""
 
@@ -185,6 +1110,12 @@ index cd6e768..ce358ca 100644
 +
 +    def verify_target_conformance(self, target: CompilerTarget) -> None:
 +        """Verify that this program conforms to the target."""
++
++    def analyze_for_target(self, target: CompilerTarget) -> QCOCircuitMetrics:
++        """Analyze this straight-line QCO program for the target."""
++
++    def expected_fidelity(self, target: CompilerTarget) -> float:
++        """Compute expected fidelity from target calibration data."""
 +
      def compile_for_target(
          self, target: CompilerTarget, *, enable_timing: bool = False, enable_statistics: bool = False

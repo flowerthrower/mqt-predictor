@@ -10,6 +10,7 @@
 
 #include "mqt/predictor/mlir/PredictorPass.h"
 
+#include "mlir/Compiler/QCOAnalysis.h"
 #include "mlir/Compiler/Target.h"
 #include "mlir/Compiler/TargetCompilation.h"
 #include "mlir/Dialect/QCO/IR/QCOOps.h"
@@ -443,7 +444,8 @@ private:
     if (failed(runPipeline(preparation, module))) {
       return ::mlir::failure();
     }
-    const auto initialAnalysis = analyzeCircuit(module, target);
+    const auto initialAnalysis =
+        analyzeCircuit(getAnalysis<::mlir::qco::QCOCircuitAnalysis>(), target);
     if (failed(initialAnalysis)) {
       return ::mlir::failure();
     }
@@ -467,7 +469,8 @@ private:
       generator.seed(seed);
     }
     for (std::size_t step = 0; step < options_.maxSteps; ++step) {
-      auto analysis = analyzeCircuit(module, target);
+      auto analysis = analyzeCircuit(
+          getAnalysis<::mlir::qco::QCOCircuitAnalysis>(), target);
       if (failed(analysis)) {
         if (options_.trace) {
           llvm::errs() << "[mqt-predictor] unsupported QCO structure at step "
@@ -497,7 +500,22 @@ private:
             ::mlir::ModuleOp::getOperationName());
         verification.addPass(
             ::mlir::qco::createVerifyTargetConformance(target));
-        return runPipeline(verification, module);
+        if (failed(runPipeline(verification, module))) {
+          return ::mlir::failure();
+        }
+        if (options_.trace) {
+          const auto fidelity =
+              getAnalysis<::mlir::qco::QCOCircuitAnalysis>().expectedFidelity(
+                  target);
+          llvm::errs() << "[mqt-predictor] terminal_expected_fidelity=";
+          if (succeeded(fidelity)) {
+            llvm::errs() << *fidelity;
+          } else {
+            llvm::errs() << "unavailable";
+          }
+          llvm::errs() << '\n';
+        }
+        return ::mlir::success();
       }
       traceDecision(step, *analysis, *decision, target, targetFingerprint,
                     legal, model);

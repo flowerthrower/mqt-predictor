@@ -119,9 +119,9 @@ struct Decision {
 /**
  * Return the legal action mask for the Core-only pass-ordering experiment.
  *
- * Optimization actions are available in every phase. Placement and routing can
- * only run before mapping, target synthesis can only run while non-native
- * operations remain, and termination requires full target conformance.
+ * Optimization actions are available in every phase. The state supplied by the
+ * caller controls whether placement, target synthesis, and termination are
+ * available. Termination still requires a separate target-conformance check.
  */
 [[nodiscard]] ActionMask legalActions(const CompilerState& state);
 
