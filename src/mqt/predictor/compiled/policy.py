@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
     from numpy.typing import NDArray
 
-OBSERVATION_SCHEMA = "mqt-predictor-core-stages/5"
+OBSERVATION_SCHEMA = "mqt-predictor-core-stages/6"
 NATIVE_POLICY_SCHEMA = "mqt-predictor-native-policy/1"
 COMPILER_TARGET_SCHEMA = "mqt-compiler-target/1"
 TARGET_FINGERPRINT_SCHEMA = b"mqt-compiler-target-fingerprint/2"

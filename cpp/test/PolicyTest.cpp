@@ -41,7 +41,7 @@ using namespace mqt::predictor::compiler;
 int main() {
   using namespace mqt::predictor::compiler;
 
-  if (EXPERIMENT_SCHEMA != "mqt-predictor-core-stages/5" ||
+  if (EXPERIMENT_SCHEMA != "mqt-predictor-core-stages/6" ||
       FEATURE_NAMES.size() != 51 || FEATURE_NAMES[0] != "c3sqrtx" ||
       FEATURE_NAMES[28] != "r" || FEATURE_NAMES[50] != "z" ||
       MAX_STEPS != 20 ||
@@ -57,7 +57,8 @@ int main() {
   features[18] = 0.2F; // depth
   features[22] = 0.6F; // liveness
 
-  auto mask = legalActions({});
+  ActionMask suppressed{};
+  auto mask = legalActions({}, suppressed);
   if (mask != ActionMask{true, true, true, true, true, false}) {
     std::cerr << "pre-mapping phase exposed the wrong actions\n";
     return EXIT_FAILURE;
@@ -67,26 +68,34 @@ int main() {
   }
 
   const CompilerState synthesizedBeforeMapping{.synthesized = true};
-  mask = legalActions(synthesizedBeforeMapping);
+  mask = legalActions(synthesizedBeforeMapping, suppressed);
   if (mask != ActionMask{true, true, true, true, false, false}) {
     std::cerr << "pre-mapping native phase exposed the wrong actions\n";
     return EXIT_FAILURE;
   }
 
   const CompilerState routed{.mapped = true, .routed = true};
-  mask = legalActions(routed);
+  mask = legalActions(routed, suppressed);
   if (mask != ActionMask{true, true, true, false, true, false}) {
     std::cerr << "routed non-native phase exposed the wrong actions\n";
     return EXIT_FAILURE;
   }
-  if (legalActions(routed) != mask) {
-    std::cerr << "repeated no-op optimizations did not remain legal\n";
+  suppressed[0] = true;
+  suppressed[1] = true;
+  if (legalActions(routed, suppressed) !=
+      ActionMask{false, false, true, false, true, false}) {
+    std::cerr << "no-op suppression did not intersect the factual mask\n";
+    return EXIT_FAILURE;
+  }
+  suppressed.fill(false);
+  if (legalActions(routed, suppressed) != mask) {
+    std::cerr << "clearing no-op suppression did not restore the factual mask\n";
     return EXIT_FAILURE;
   }
 
   const CompilerState compiled{
       .mapped = true, .routed = true, .synthesized = true};
-  mask = legalActions(compiled);
+  mask = legalActions(compiled, suppressed);
   if (mask != ActionMask{true, true, true, false, false, true}) {
     std::cerr << "compiled phase exposed the wrong actions\n";
     return EXIT_FAILURE;

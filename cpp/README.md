@@ -63,19 +63,18 @@ program for the complete episode. The MLIR pass likewise mutates one persistent
 5. `synthesize-for-target`; and
 6. `terminate`.
 
-The three optimization actions are legal in every phase. They may be repeated,
-including when they have no effect and after mapping or synthesis. Every
-selection still consumes one decision. After every action, the shared Core
-analysis recomputes mapping, routing, and target-native synthesis from the
-resulting QCO program. As in #798, the first decision exposes every transform
-and excludes termination; later decisions derive their mask from the factual
-analysis. Placement and routing is then legal only while the program is
+The three optimization actions are legal in every phase. After every action, the
+shared Core analysis recomputes mapping, routing, and target-native synthesis
+from the resulting QCO program. As in #798, the first decision exposes every
+transform and excludes termination; later decisions derive their mask from the
+factual analysis. Placement and routing is then legal only while the program is
 unmapped, synthesis is legal while non-native operations remain, and termination
-is exposed only for a mapped, routed, target-native program. Consequently, an
-ineffective stage cannot advance the phase, and an optimization invalidates
-synthesis only when its result is actually non-native. Core separately verifies
-target conformance before accepting termination. There is no retry suppression,
-pass-history feature, or budget reservation for later actions.
+is exposed only for a mapped, routed, target-native program. An action that
+leaves the IR unchanged is additionally masked until another action changes the
+IR; several no-op masks may accumulate. Every selection still consumes one
+decision. Core separately verifies target conformance before accepting
+termination. The actor receives no pass-history feature and no budget is
+reserved for later actions.
 
 The horizon is 20 total policy decisions, including `terminate`. Termination may
 succeed as the twentieth decision. A twentieth non-termination action ends the
@@ -96,7 +95,7 @@ product, not scheduled durations and qubit-coherence decay.
 
 ## Policy ABI
 
-Schema `mqt-predictor-core-stages/5` contains exactly 51 ordered `float32`
+Schema `mqt-predictor-core-stages/6` contains exactly 51 ordered `float32`
 features. Python exposes them as a Gymnasium `Dict` of scalar `Box(0, 1)`
 spaces; the effective Stable-Baselines3 concatenation order and the C++/ONNX
 order are:

@@ -19,7 +19,7 @@
 namespace mqt::predictor::compiler {
 
 inline constexpr std::string_view EXPERIMENT_SCHEMA =
-    "mqt-predictor-core-stages/5";
+    "mqt-predictor-core-stages/6";
 inline constexpr std::size_t NUM_FEATURES = 51;
 inline constexpr std::array<std::string_view, NUM_FEATURES> FEATURE_NAMES{
     "c3sqrtx",
@@ -116,11 +116,12 @@ struct Decision {
 /**
  * Return the legal action mask for the Core-only pass-ordering experiment.
  *
- * Optimization actions are available in every phase. The state supplied by the
- * caller controls whether placement, target synthesis, and termination are
- * available. Termination still requires a separate target-conformance check.
+ * The state controls the compilation-phase constraints. The suppression mask
+ * excludes actions that were no-ops for the current IR. Termination still
+ * requires a separate target-conformance check.
  */
-[[nodiscard]] ActionMask legalActions(const CompilerState& state);
+[[nodiscard]] ActionMask legalActions(const CompilerState& state,
+                                      const ActionMask& suppressed);
 
 /**
  * A dependency-free actor used to exercise the compiled policy boundary.

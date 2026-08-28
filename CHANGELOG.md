@@ -12,6 +12,7 @@ releases may include breaking changes.
 
 ### Changed
 
+- ✨ Mask Core actions after exact IR no-ops until another action changes the IR
 - ✨ Replace composite BQSKit compilation actions with atomic passes ([#731])
   ([**@flowerthrower**])
 

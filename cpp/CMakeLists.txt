@@ -184,7 +184,7 @@ if(BUILD_TESTING)
       mqt-predictor-iqm-garnet-onnx-model-e2e
       PROPERTIES
         PASS_REGULAR_EXPRESSION
-        "policy=model model_schema=mqt-predictor-onnx-policy/1.*sampling=stochastic sampling_seed=19.*r=8.181818e-01.*action=terminate.*terminal_expected_fidelity=9.231927e-01"
+        "policy=model model_schema=mqt-predictor-onnx-policy/1.*sampling=stochastic sampling_seed=19.*r=8.181818e-01.*step=4 action=fuse-single-qubit-unitary-runs.*legal=111010.*no-effect action=fuse-single-qubit-unitary-runs.*step=5 action=synthesize-for-target.*legal=101010.*step=6 action=fuse-two-qubit-gates.*legal=111001.*action=terminate.*terminal_expected_fidelity=9.231927e-01"
         FAIL_REGULAR_EXPRESSION "falling back;truncated;error:")
   endif()
 
@@ -284,7 +284,7 @@ if(BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/wide.qasm)
   set_tests_properties(
     mqt-predictor-wide-e2e
-    PROPERTIES PASS_REGULAR_EXPRESSION "schema=mqt-predictor-core-stages/5"
+    PROPERTIES PASS_REGULAR_EXPRESSION "schema=mqt-predictor-core-stages/6"
                FAIL_REGULAR_EXPRESSION "unsupported QCO structure;error:")
 
   add_test(

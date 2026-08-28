@@ -501,29 +501,38 @@ def test_each_core_stage_calls_its_bound_method(
     assert any(stage == marker for stage, _ in compiler.stage_calls)
 
 
-def test_repeated_noop_passes_remain_legal(
+def test_noop_actions_remain_masked_until_the_ir_changes(
     bell: QuantumCircuit,
     compiler: _FakeCompiler,
 ) -> None:
-    """The v3 policy may select the same ineffective pass repeatedly."""
-    compiler.noop_actions.add(ACTION_NAMES[0])
+    """No-op masks accumulate for one IR and clear after an effective action."""
+    compiler.noop_actions.update({ACTION_NAMES[0], ACTION_NAMES[1]})
     env = _environment([bell])
     env.reset()
 
-    _, first_reward, _, _, first_info = env.step(0)
-    _, second_reward, _, _, second_info = env.step(0)
-
+    _, _, _, _, first_info = env.step(0)
     assert not first_info["changed"]
+    assert env.action_masks() == [False, True, True, True, True, False]
+
+    _, _, _, _, second_info = env.step(1)
     assert not second_info["changed"]
-    assert first_reward == pytest.approx(0.0)
-    assert second_reward == pytest.approx(0.0)
-    assert env.action_masks()[0]
-    assert env.used_actions == [ACTION_NAMES[0], ACTION_NAMES[0]]
+    assert env.action_masks() == [False, False, True, True, True, False]
+
+    _, _, _, _, changed_info = env.step(2)
+    assert changed_info["changed"]
+    assert env.action_masks() == [True, True, True, True, True, False]
 
 
-@pytest.mark.parametrize("action", [3, 4])
+@pytest.mark.parametrize(
+    ("action", "expected_mask"),
+    [
+        (3, [True, True, True, False, True, False]),
+        (4, [True, True, True, True, False, False]),
+    ],
+)
 def test_noop_stage_does_not_advance_factual_state(
     action: int,
+    expected_mask: list[bool],
     bell: QuantumCircuit,
     compiler: _FakeCompiler,
 ) -> None:
@@ -540,7 +549,7 @@ def test_noop_stage_does_not_advance_factual_state(
         "routed": False,
         "synthesized": False,
     }
-    assert env.action_masks() == [True, True, True, True, True, False]
+    assert env.action_masks() == expected_mask
 
 
 def test_factual_synthesis_survives_preserving_optimization(

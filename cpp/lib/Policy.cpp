@@ -10,6 +10,7 @@
 
 #include "mqt/predictor/mlir/Policy.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <limits>
@@ -46,11 +47,14 @@ std::string_view actionName(const Action action) {
   return ACTION_NAMES[actionIndex];
 }
 
-ActionMask legalActions(const CompilerState& state) {
-  ActionMask legal{true, true, true, true, true, false};
-  legal[index(Action::PlaceAndRoute)] = !state.mapped;
-  legal[index(Action::SynthesizeForTarget)] = !state.synthesized;
-  legal[index(Action::Terminate)] =
+ActionMask legalActions(const CompilerState& state,
+                        const ActionMask& suppressed) {
+  ActionMask legal{};
+  std::transform(suppressed.begin(), suppressed.end(), legal.begin(),
+                 [](const bool isSuppressed) { return !isSuppressed; });
+  legal[index(Action::PlaceAndRoute)] &= !state.mapped;
+  legal[index(Action::SynthesizeForTarget)] &= !state.synthesized;
+  legal[index(Action::Terminate)] &=
       state.mapped && state.routed && state.synthesized;
   return legal;
 }

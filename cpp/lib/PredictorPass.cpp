@@ -466,6 +466,7 @@ private:
       std::seed_seq seed{entropy(), entropy(), entropy(), entropy()};
       generator.seed(seed);
     }
+    ActionMask suppressed{};
     for (std::size_t step = 0; step < options_.maxSteps; ++step) {
       auto analysis = analyzeCircuit(
           getAnalysis<::mlir::qco::QCOCircuitAnalysis>(), target);
@@ -478,8 +479,8 @@ private:
       }
       const auto moduleBefore = moduleFingerprint(module);
       const auto legal = model != nullptr && step == 0
-                             ? legalActions(CompilerState{})
-                             : legalActions(analysis->state);
+                             ? legalActions(CompilerState{}, suppressed)
+                             : legalActions(analysis->state, suppressed);
       const auto decision =
           model != nullptr
               ? options_.deterministicPolicy
@@ -520,7 +521,10 @@ private:
         return ::mlir::failure();
       }
       const auto changed = moduleBefore != moduleFingerprint(module);
-      if (!changed) {
+      if (changed) {
+        suppressed.fill(false);
+      } else {
+        suppressed[static_cast<std::size_t>(decision->action)] = true;
         if (options_.trace) {
           llvm::errs() << "[mqt-predictor] no-effect action="
                        << actionName(decision->action) << '\n';

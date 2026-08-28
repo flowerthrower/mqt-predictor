@@ -238,6 +238,7 @@ class CorePredictorEnv(Env):
         self._circuit_index = 0
         self._num_steps = 0
         self._episode_ended = False
+        self._noop_actions: set[int] = set()
         self._last_observation = {name: np.zeros(1, dtype=np.float32) for name in FEATURE_NAMES}
         self.used_actions: list[str] = []
 
@@ -330,6 +331,7 @@ class CorePredictorEnv(Env):
         self._synthesized = synthesized
         self._num_steps = 0
         self._episode_ended = False
+        self._noop_actions.clear()
         self._last_observation = observation
         self.used_actions = []
         return observation, {
@@ -341,7 +343,7 @@ class CorePredictorEnv(Env):
         """Return actions permitted by the current compilation phase."""
         if self._num_steps == 0:
             return [True] * NUM_TRANSFORM_ACTIONS + [False]
-        transforms = [True] * NUM_TRANSFORM_ACTIONS
+        transforms = [action not in self._noop_actions for action in range(NUM_TRANSFORM_ACTIONS)]
         transforms[PLACE_AND_ROUTE_ACTION] &= not self._mapped
         transforms[SYNTHESIZE_ACTION] &= not self._synthesized
         return [*transforms, self._is_conformant()]
@@ -453,6 +455,10 @@ class CorePredictorEnv(Env):
         self._mapped = candidate_mapped
         self._routed = candidate_routed
         self._synthesized = candidate_synthesized
+        if changed:
+            self._noop_actions.clear()
+        else:
+            self._noop_actions.add(action)
         self._num_steps += 1
         self._last_observation = observation
         terminated = self._num_steps >= self.max_steps

@@ -69,7 +69,7 @@
     "y",
     "z"
   ],
-  "observation_schema": "mqt-predictor-core-stages/5",
+  "observation_schema": "mqt-predictor-core-stages/6",
   "parameters": {
     "bias": [0.0, 0.0, 0.0, 2.0, 1.0, 3.0],
     "weights": [
