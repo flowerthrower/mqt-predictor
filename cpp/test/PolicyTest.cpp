@@ -41,9 +41,10 @@ using namespace mqt::predictor::compiler;
 int main() {
   using namespace mqt::predictor::compiler;
 
-  if (EXPERIMENT_SCHEMA != "mqt-predictor-core-stages/4" ||
-      FEATURE_NAMES.size() != 50 || FEATURE_NAMES[0] != "c3sqrtx" ||
-      FEATURE_NAMES[49] != "z" || MAX_STEPS != 20 ||
+  if (EXPERIMENT_SCHEMA != "mqt-predictor-core-stages/5" ||
+      FEATURE_NAMES.size() != 51 || FEATURE_NAMES[0] != "c3sqrtx" ||
+      FEATURE_NAMES[28] != "r" || FEATURE_NAMES[50] != "z" ||
+      MAX_STEPS != 20 ||
       PredictorOptions{}.maxSteps != 20 ||
       PredictorOptions{}.deterministicPolicy ||
       PredictorOptions{}.samplingSeed.has_value()) {

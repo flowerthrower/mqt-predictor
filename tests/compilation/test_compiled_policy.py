@@ -43,11 +43,11 @@ INPUTS = Path(__file__).parents[2] / "cpp" / "test" / "Inputs"
 
 
 def test_observation_matches_predictor_v3_flat_features() -> None:
-    """The compiled actor consumes the exact 50 non-GNN Predictor v3 features."""
+    """The compiled actor consumes the exact 51 non-GNN Predictor v3 features."""
     assert FEATURE_NAMES == V3_FEATURE_NAMES
     assert tuple(sorted(FEATURE_NAMES)) == FEATURE_NAMES
-    assert len(FEATURE_NAMES) == 50
-    assert OBSERVATION_SCHEMA == "mqt-predictor-core-stages/4"
+    assert len(FEATURE_NAMES) == 51
+    assert OBSERVATION_SCHEMA == "mqt-predictor-core-stages/5"
 
 
 def test_minimal_training_is_deterministic() -> None:

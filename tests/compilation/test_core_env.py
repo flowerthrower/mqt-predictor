@@ -361,6 +361,7 @@ def test_core_environment_has_compact_stable_abi(bell: QuantumCircuit, compiler:
         "p",
         "parallelism",
         "program_communication",
+        "r",
         "rc3x",
         "rccx",
         "rx",
@@ -449,10 +450,11 @@ def test_actions_keep_one_persistent_qco_state(bell: QuantumCircuit, compiler: _
     assert all(np.array_equal(first_observation[name], second_observation[name]) for name in FEATURE_NAMES)
 
 
-def test_gate_frequencies_keep_unknown_operations_in_denominator(compiler: _FakeCompiler) -> None:
-    """The v3 gate-frequency denominator includes operations outside its vocabulary."""
+def test_gate_frequencies_include_r_and_keep_unknown_operations_in_denominator(compiler: _FakeCompiler) -> None:
+    """The v3 gate frequencies include r and count unknown operations but not barriers."""
     circuit = QuantumCircuit(1, 1)
     circuit.r(0.5, 0.25, 0)
+    circuit.reset(0)
     circuit.barrier()
     circuit.x(0)
     circuit.measure(0, 0)
@@ -461,8 +463,9 @@ def test_gate_frequencies_keep_unknown_operations_in_denominator(compiler: _Fake
     observation, _ = env.reset(options={"circuit_index": 0})
 
     assert compiler.imports == 1
-    assert _feature(observation, "x") == pytest.approx(1 / 3)
-    assert _feature(observation, "measure") == pytest.approx(1 / 3)
+    assert _feature(observation, "r") == pytest.approx(1 / 4)
+    assert _feature(observation, "x") == pytest.approx(1 / 4)
+    assert _feature(observation, "measure") == pytest.approx(1 / 4)
 
 
 @pytest.mark.parametrize("action", range(3))

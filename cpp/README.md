@@ -41,8 +41,8 @@ Python training
   Qiskit circuit -> Core QCO -> CorePredictorEnv
     -> Core QCO analysis after each action
     -> Core target-calibration fidelity at termination
-    -> MaskablePPO actor  50 -> 64 -> 64 -> 6
-    -> MaskablePPO critic 50 -> 64 -> 64 -> 1  (training only)
+    -> MaskablePPO actor  51 -> 64 -> 64 -> 6
+    -> MaskablePPO critic 51 -> 64 -> 64 -> 1  (training only)
     -> actor ONNX
 
 C++ deployment
@@ -96,7 +96,7 @@ product, not scheduled durations and qubit-coherence decay.
 
 ## Policy ABI
 
-Schema `mqt-predictor-core-stages/4` contains exactly 50 ordered `float32`
+Schema `mqt-predictor-core-stages/5` contains exactly 51 ordered `float32`
 features. Python exposes them as a Gymnasium `Dict` of scalar `Box(0, 1)`
 spaces; the effective Stable-Baselines3 concatenation order and the C++/ONNX
 order are:
@@ -105,11 +105,11 @@ order are:
 c3sqrtx, c3x, c4x, ccx, ch, cp, critical_depth, crx, cry, crz,
 cswap, csx, cu, cu1, cu3, cx, cy, cz, depth, entanglement_ratio,
 h, id, liveness, measure, num_qubits, p, parallelism,
-program_communication, rc3x, rccx, rx, rxx, ry, rz, rzz, s, sdg,
+program_communication, r, rc3x, rccx, rx, rxx, ry, rz, rzz, s, sdg,
 swap, sx, sxdg, t, tdg, u, u0, u1, u2, u3, x, y, z
 ```
 
-These are 43 operation frequencies, target-relative logical-qubit count,
+These are 44 operation frequencies, target-relative logical-qubit count,
 log-normalized depth, and the five structural features `critical_depth`,
 `entanglement_ratio`, `parallelism`, `program_communication`, and `liveness`.
 Values are clamped to `[0, 1]`. Barriers are omitted, while unknown operations
@@ -118,7 +118,7 @@ action counts, pass history, or other hidden state.
 
 The PPO actor and critic each have two 64-unit Tanh hidden layers and retain
 Stable-Baselines3 orthogonal initialization. Only the actor is exported. Its
-`50 -> 64 -> 64 -> 6` graph contains 7,814 `float32` parameters and returns six
+`51 -> 64 -> 64 -> 6` graph contains 7,878 `float32` parameters and returns six
 unmasked logits. The host applies the legal-action mask.
 
 Native inference samples the masked softmax at temperature 1 by default. With no
@@ -242,9 +242,10 @@ structural proxy.
 ## Results
 
 The deployed factual-state ONNX actor has SHA-256
-`7ace5a7fcaf2e08e9e4dd8c51b0206dbc8601a7a631349a95468b32a39eb0955`. Its logits
-agree with the exported PyTorch actor within `3.58e-7` over 100 random feature
-vectors.
+`ac2069f022cdda15d33ef0e2502b85ba04765c8b5f441ee76dc25a5f9ceb197b`. Its new `r`
+input column is zero-initialized, so its logits remain unchanged until
+retraining. Its logits agree with the exported PyTorch actor within `3.58e-7`
+over 100 random feature vectors.
 
 The actor was evaluated on every training circuit once deterministically and
 five times stochastically with seeds 7, 19, 43, 71, and 97. All means include

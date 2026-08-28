@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
     from numpy.typing import NDArray
 
-OBSERVATION_SCHEMA = "mqt-predictor-core-stages/4"
+OBSERVATION_SCHEMA = "mqt-predictor-core-stages/5"
 NATIVE_POLICY_SCHEMA = "mqt-predictor-native-policy/1"
 COMPILER_TARGET_SCHEMA = "mqt-compiler-target/1"
 TARGET_FINGERPRINT_SCHEMA = b"mqt-compiler-target-fingerprint/2"
@@ -77,6 +77,7 @@ V3_OPERATION_NAMES = (
     "c3sqrtx",
     "c4x",
     "measure",
+    "r",
 )
 
 V3_FEATURE_NAMES = (
@@ -108,6 +109,7 @@ V3_FEATURE_NAMES = (
     "p",
     "parallelism",
     "program_communication",
+    "r",
     "rc3x",
     "rccx",
     "rx",

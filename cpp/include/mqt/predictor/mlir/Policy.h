@@ -19,8 +19,8 @@
 namespace mqt::predictor::compiler {
 
 inline constexpr std::string_view EXPERIMENT_SCHEMA =
-    "mqt-predictor-core-stages/4";
-inline constexpr std::size_t NUM_FEATURES = 50;
+    "mqt-predictor-core-stages/5";
+inline constexpr std::size_t NUM_FEATURES = 51;
 inline constexpr std::array<std::string_view, NUM_FEATURES> FEATURE_NAMES{
     "c3sqrtx",
     "c3x",
@@ -50,6 +50,7 @@ inline constexpr std::array<std::string_view, NUM_FEATURES> FEATURE_NAMES{
     "p",
     "parallelism",
     "program_communication",
+    "r",
     "rc3x",
     "rccx",
     "rx",
