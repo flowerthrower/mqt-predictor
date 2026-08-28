@@ -105,6 +105,15 @@ class _QCOCircuitMetrics(Protocol):
     @property
     def program_communication(self) -> float: ...
 
+    @property
+    def mapped(self) -> bool: ...
+
+    @property
+    def routed(self) -> bool: ...
+
+    @property
+    def synthesized(self) -> bool: ...
+
 
 class _QCProgramFactory(Protocol):
     """Subset of the Core QC program factory used by the environment."""
@@ -257,10 +266,10 @@ class CorePredictorEnv(Env):
             raise ValueError(msg)
         self._pass_timeout = pass_timeout
 
-    def _observation_for(
+    def _analysis_for(
         self,
         program: _QCOProgram,
-    ) -> dict[str, NDArray[np.float32]]:
+    ) -> tuple[dict[str, NDArray[np.float32]], bool, bool, bool]:
         analysis = program.analyze_for_target(self.target)
         operation_counts = analysis.operation_counts
         denominator = max(analysis.total_operations, 1)
@@ -274,7 +283,10 @@ class CorePredictorEnv(Env):
             "parallelism": analysis.parallelism,
             "program_communication": analysis.program_communication,
         }
-        return {name: np.clip(np.asarray([v3_features[name]], dtype=np.float32), 0.0, 1.0) for name in FEATURE_NAMES}
+        observation = {
+            name: np.clip(np.asarray([v3_features[name]], dtype=np.float32), 0.0, 1.0) for name in FEATURE_NAMES
+        }
+        return observation, analysis.mapped, analysis.routed, analysis.synthesized
 
     def _is_conformant(self) -> bool:
         return self._mapped and self._routed and self._synthesized
@@ -310,12 +322,12 @@ class CorePredictorEnv(Env):
         program = self._compiler.QCProgram.from_qiskit(circuit).to_qco()
         program.cleanup()
         program.decompose_multi_controlled()
-        observation = self._observation_for(program)
+        observation, mapped, routed, synthesized = self._analysis_for(program)
 
         self._program = program
-        self._mapped = False
-        self._routed = False
-        self._synthesized = False
+        self._mapped = mapped
+        self._routed = routed
+        self._synthesized = synthesized
         self._num_steps = 0
         self._episode_ended = False
         self._last_observation = observation
@@ -327,6 +339,8 @@ class CorePredictorEnv(Env):
 
     def action_masks(self) -> list[bool]:
         """Return actions permitted by the current compilation phase."""
+        if self._num_steps == 0:
+            return [True] * NUM_TRANSFORM_ACTIONS + [False]
         transforms = [True] * NUM_TRANSFORM_ACTIONS
         transforms[PLACE_AND_ROUTE_ACTION] &= not self._mapped
         transforms[SYNTHESIZE_ACTION] &= not self._synthesized
@@ -373,18 +387,7 @@ class CorePredictorEnv(Env):
         with _enforce_pass_timeout(self.pass_timeout):
             self._apply_action(candidate, action)
         changed = before != candidate.ir
-        candidate_mapped = self._mapped
-        candidate_routed = self._routed
-        candidate_synthesized = self._synthesized
-        if action < PLACE_AND_ROUTE_ACTION and changed:
-            candidate_synthesized = False
-        elif action == PLACE_AND_ROUTE_ACTION:
-            candidate_mapped = True
-            candidate_routed = True
-            candidate_synthesized = False
-        elif action == SYNTHESIZE_ACTION:
-            candidate_synthesized = True
-        observation = self._observation_for(candidate)
+        observation, candidate_mapped, candidate_routed, candidate_synthesized = self._analysis_for(candidate)
         return (
             candidate,
             observation,
@@ -414,10 +417,13 @@ class CorePredictorEnv(Env):
                 with _enforce_pass_timeout(self.pass_timeout):
                     candidate.verify_target_conformance(self.target)
                 reward = candidate.expected_fidelity(self.target)
-                observation = self._observation_for(candidate)
+                observation, candidate_mapped, candidate_routed, candidate_synthesized = self._analysis_for(candidate)
             except Exception as error:  # ruff:ignore[blind-except]
                 return self._failed_step(error)
             self._program = candidate
+            self._mapped = candidate_mapped
+            self._routed = candidate_routed
+            self._synthesized = candidate_synthesized
             self._num_steps += 1
             self._episode_ended = True
             self._last_observation = observation

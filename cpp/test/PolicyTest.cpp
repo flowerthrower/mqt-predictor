@@ -41,7 +41,7 @@ using namespace mqt::predictor::compiler;
 int main() {
   using namespace mqt::predictor::compiler;
 
-  if (EXPERIMENT_SCHEMA != "mqt-predictor-core-stages/3" ||
+  if (EXPERIMENT_SCHEMA != "mqt-predictor-core-stages/4" ||
       FEATURE_NAMES.size() != 50 || FEATURE_NAMES[0] != "c3sqrtx" ||
       FEATURE_NAMES[49] != "z" || MAX_STEPS != 20 ||
       PredictorOptions{}.maxSteps != 20 ||
@@ -80,16 +80,6 @@ int main() {
   }
   if (legalActions(routed) != mask) {
     std::cerr << "repeated no-op optimizations did not remain legal\n";
-    return EXIT_FAILURE;
-  }
-
-  if (!isOptimizationAction(Action::MergeSingleQubitRotationGates) ||
-      !isOptimizationAction(Action::FuseSingleQubitUnitaryRuns) ||
-      !isOptimizationAction(Action::FuseTwoQubitGates) ||
-      isOptimizationAction(Action::PlaceAndRoute) ||
-      isOptimizationAction(Action::SynthesizeForTarget) ||
-      isOptimizationAction(Action::Terminate)) {
-    std::cerr << "Core stage classification is inconsistent\n";
     return EXIT_FAILURE;
   }
 

@@ -47,7 +47,7 @@ def test_observation_matches_predictor_v3_flat_features() -> None:
     assert FEATURE_NAMES == V3_FEATURE_NAMES
     assert tuple(sorted(FEATURE_NAMES)) == FEATURE_NAMES
     assert len(FEATURE_NAMES) == 50
-    assert OBSERVATION_SCHEMA == "mqt-predictor-core-stages/3"
+    assert OBSERVATION_SCHEMA == "mqt-predictor-core-stages/4"
 
 
 def test_minimal_training_is_deterministic() -> None:

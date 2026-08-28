@@ -19,7 +19,7 @@
 namespace mqt::predictor::compiler {
 
 inline constexpr std::string_view EXPERIMENT_SCHEMA =
-    "mqt-predictor-core-stages/3";
+    "mqt-predictor-core-stages/4";
 inline constexpr std::size_t NUM_FEATURES = 50;
 inline constexpr std::array<std::string_view, NUM_FEATURES> FEATURE_NAMES{
     "c3sqrtx",
@@ -97,10 +97,6 @@ inline constexpr std::array<std::string_view, NUM_ACTIONS> ACTION_NAMES{
     "synthesize-for-target",
     "terminate"};
 using ActionMask = std::array<bool, NUM_ACTIONS>;
-
-[[nodiscard]] constexpr bool isOptimizationAction(const Action action) {
-  return action < Action::PlaceAndRoute;
-}
 
 struct CompilerState {
   bool mapped = false;

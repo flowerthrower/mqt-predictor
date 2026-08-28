@@ -456,8 +456,6 @@ private:
       }
       return ::mlir::failure();
     }
-    CompilerState policyState{};
-
     BootstrapLinearPolicy policy;
     std::mt19937_64 generator;
     if (model != nullptr && !options_.deterministicPolicy &&
@@ -478,12 +476,10 @@ private:
         }
         return ::mlir::failure();
       }
-      if (model != nullptr) {
-        analysis->state = policyState;
-      }
-
       const auto moduleBefore = moduleFingerprint(module);
-      const auto legal = legalActions(analysis->state);
+      const auto legal = model != nullptr && step == 0
+                             ? legalActions(CompilerState{})
+                             : legalActions(analysis->state);
       const auto decision =
           model != nullptr
               ? options_.deterministicPolicy
@@ -524,17 +520,6 @@ private:
         return ::mlir::failure();
       }
       const auto changed = moduleBefore != moduleFingerprint(module);
-      if (model != nullptr) {
-        if (isOptimizationAction(decision->action) && changed) {
-          policyState.synthesized = false;
-        } else if (decision->action == Action::PlaceAndRoute) {
-          policyState.mapped = true;
-          policyState.routed = true;
-          policyState.synthesized = false;
-        } else if (decision->action == Action::SynthesizeForTarget) {
-          policyState.synthesized = true;
-        }
-      }
       if (!changed) {
         if (options_.trace) {
           llvm::errs() << "[mqt-predictor] no-effect action="

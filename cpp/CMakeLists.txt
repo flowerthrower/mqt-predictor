@@ -213,7 +213,7 @@ if(BUILD_TESTING)
     mqt-predictor-model-native-input-state-e2e
     PROPERTIES
       PASS_REGULAR_EXPRESSION
-      "step=0.*mapped=0 routed=0 synthesized=0 legal=111110"
+      "step=0 action=place-and-route.*mapped=0 routed=0 synthesized=1 legal=111110.*step=1 action=terminate.*mapped=1 routed=1 synthesized=1 legal=111001"
       FAIL_REGULAR_EXPRESSION "falling back;error:")
 
   add_test(
@@ -284,7 +284,7 @@ if(BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/wide.qasm)
   set_tests_properties(
     mqt-predictor-wide-e2e
-    PROPERTIES PASS_REGULAR_EXPRESSION "schema=mqt-predictor-core-stages/3"
+    PROPERTIES PASS_REGULAR_EXPRESSION "schema=mqt-predictor-core-stages/4"
                FAIL_REGULAR_EXPRESSION "unsupported QCO structure;error:")
 
   add_test(

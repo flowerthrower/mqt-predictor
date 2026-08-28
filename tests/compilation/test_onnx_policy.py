@@ -201,3 +201,23 @@ def test_onnx_loader_rejects_incompatible_metadata(tmp_path: Path) -> None:
             expected_target_fingerprint=f"sha256:{'b' * 64}",
             expected_core_revision="core-revision",
         )
+
+
+def test_onnx_loader_rejects_action_history_schema(tmp_path: Path) -> None:
+    """A policy trained with action-derived phases cannot run with factual masks."""
+    onnx = pytest.importorskip("onnx")
+    pytest.importorskip("onnxruntime")
+    path = tmp_path / "policy.onnx"
+    _export(path)
+    model = onnx.load_model(str(path))
+    next(
+        entry for entry in model.metadata_props if entry.key == "observation_schema"
+    ).value = "mqt-predictor-core-stages/3"
+    onnx.save_model(model, str(path))
+
+    with pytest.raises(ValueError, match="metadata does not match"):
+        load_onnx_policy(
+            path,
+            expected_target_fingerprint=TARGET_FINGERPRINT,
+            expected_core_revision="core-revision",
+        )

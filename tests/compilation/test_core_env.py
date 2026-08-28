@@ -79,9 +79,19 @@ class _FakeMetrics:
     parallelism: float
     liveness: float
     program_communication: float
+    mapped: bool
+    routed: bool
+    synthesized: bool
 
 
-def _metrics_for(circuit: QuantumCircuit, *, num_qubits: int) -> _FakeMetrics:
+def _metrics_for(
+    circuit: QuantumCircuit,
+    *,
+    num_qubits: int,
+    mapped: bool = False,
+    routed: bool = False,
+    synthesized: bool = False,
+) -> _FakeMetrics:
     states = [(0, 0)] * circuit.num_qubits
     interactions: set[tuple[int, int]] = set()
     operation_counts: dict[str, int] = {}
@@ -124,6 +134,9 @@ def _metrics_for(circuit: QuantumCircuit, *, num_qubits: int) -> _FakeMetrics:
         parallelism=max(((num_gates / depth) - 1) / (num_qubits - 1), 0.0) if num_qubits > 1 and depth else 0.0,
         liveness=activity / (num_qubits * depth) if num_qubits and depth else 0.0,
         program_communication=2 * len(interactions) / (num_qubits * (num_qubits - 1)) if num_qubits > 1 else 0.0,
+        mapped=mapped,
+        routed=routed,
+        synthesized=synthesized,
     )
 
 
@@ -197,8 +210,25 @@ class _FakeQCOProgram(_FakeQCProgram):
         if any(marker in self.ir for marker in self.compiler.failing_analysis_markers):
             msg = f"failed analysis of {self.ir}"
             raise RuntimeError(msg)
-        mapped = "|place-and-route" in self.ir
-        return _metrics_for(self.circuit, num_qubits=target.num_qubits if mapped else self.circuit.num_qubits)
+        mapped = False
+        routed = False
+        synthesized = self.compiler.initial_synthesized
+        for marker in self.ir.split("|"):
+            if marker == ACTION_NAMES[3]:
+                mapped = True
+                routed = True
+                synthesized = False
+            elif marker == ACTION_NAMES[4]:
+                synthesized = True
+            elif marker in ACTION_NAMES[:3] and marker not in self.compiler.synthesis_preserving_actions:
+                synthesized = False
+        return _metrics_for(
+            self.circuit,
+            num_qubits=target.num_qubits if mapped else self.circuit.num_qubits,
+            mapped=mapped,
+            routed=routed,
+            synthesized=synthesized,
+        )
 
     def expected_fidelity(self, target: _FakeTarget) -> float:
         self.compiler.fidelity_targets.append(target)
@@ -245,6 +275,8 @@ class _FakeCompiler:
         self.failing_actions: set[str] = set()
         self.failing_stages: set[str] = set()
         self.failing_analysis_markers: set[str] = set()
+        self.synthesis_preserving_actions: set[str] = set()
+        self.initial_synthesized = False
         self.action_delays: dict[str, float] = {}
         self.fail_compilation = False
 
@@ -484,6 +516,46 @@ def test_repeated_noop_passes_remain_legal(
     assert second_reward == pytest.approx(0.0)
     assert env.action_masks()[0]
     assert env.used_actions == [ACTION_NAMES[0], ACTION_NAMES[0]]
+
+
+@pytest.mark.parametrize("action", [3, 4])
+def test_noop_stage_does_not_advance_factual_state(
+    action: int,
+    bell: QuantumCircuit,
+    compiler: _FakeCompiler,
+) -> None:
+    """A selected stage advances the phase only when Core analysis observes it."""
+    compiler.noop_stages.add(ACTION_NAMES[action])
+    env = _environment([bell])
+    env.reset()
+
+    _, _, _, _, info = env.step(action)
+
+    assert info == {
+        "changed": False,
+        "mapped": False,
+        "routed": False,
+        "synthesized": False,
+    }
+    assert env.action_masks() == [True, True, True, True, True, False]
+
+
+def test_factual_synthesis_survives_preserving_optimization(
+    bell: QuantumCircuit,
+    compiler: _FakeCompiler,
+) -> None:
+    """A changed optimization does not clear synthesis when Core still reports native IR."""
+    compiler.synthesis_preserving_actions.add(ACTION_NAMES[0])
+    env = _environment([bell])
+    env.reset()
+    env.step(3)
+    env.step(4)
+
+    _, _, _, _, info = env.step(0)
+
+    assert info["changed"]
+    assert info["synthesized"]
+    assert env.action_masks() == [True, True, True, False, False, True]
 
 
 @pytest.mark.usefixtures("compiler")
@@ -1061,21 +1133,28 @@ def test_current_core_decomposes_wide_gates_during_reset(
     assert not truncated
 
 
-def test_current_core_native_input_uses_action_derived_stages(
+def test_current_core_native_input_uses_factual_stages(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Training and compiled inference share conservative phase transitions."""
+    """Core analysis, not action history, drives each post-action phase."""
     monkeypatch.chdir(tmp_path)
     pytest.importorskip("mqt.core.mlir")
     target = _iqm_target()
     circuit = QuantumCircuit(2, 2)
     circuit.r(0.5, 0.2, 0)
     circuit.cz(0, 1)
+    circuit.cz(0, 1)
     circuit.measure([0, 1], [0, 1])
     env = CorePredictorEnv([circuit], target, max_steps=3)
 
-    env.reset(options={"circuit_index": 0})
+    _, reset_info = env.reset(options={"circuit_index": 0})
+    assert reset_info == {
+        "circuit_index": 0,
+        "mapped": False,
+        "routed": False,
+        "synthesized": True,
+    }
     assert env.action_masks() == [True, True, True, True, True, False]
 
     _, _, _, _, info = env.step(3)
@@ -1083,9 +1162,18 @@ def test_current_core_native_input_uses_action_derived_stages(
         "changed": True,
         "mapped": True,
         "routed": True,
-        "synthesized": False,
+        "synthesized": True,
     }
-    assert env.action_masks() == [True, True, True, False, True, False]
+    assert env.action_masks() == [True, True, True, False, False, True]
+
+    _, _, _, _, info = env.step(2)
+    assert info == {
+        "changed": True,
+        "mapped": True,
+        "routed": True,
+        "synthesized": True,
+    }
+    assert env.action_masks() == [True, True, True, False, False, True]
 
 
 def test_current_core_qft_uses_compiled_critical_path_semantics(
