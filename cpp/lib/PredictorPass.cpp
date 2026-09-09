@@ -23,8 +23,11 @@
 #include "mqt/predictor/mlir/Policy.h"
 #include "mqt/predictor/mlir/Target.h"
 
+#include <llvm/ADT/StringExtras.h>
 #include <llvm/ADT/StringRef.h>
 #include <llvm/Support/Error.h>
+#include <llvm/Support/Format.h>
+#include <llvm/Support/SHA256.h>
 #include <llvm/Support/raw_ostream.h>
 #include <mlir/IR/BuiltinOps.h>
 #include <mlir/IR/OwningOpRef.h>
@@ -69,6 +72,12 @@ struct ExhaustiveCandidate {
   llvm::raw_string_ostream stream(fingerprint);
   module.print(stream);
   return fingerprint;
+}
+
+[[nodiscard]] std::string irChecksum(const std::string_view ir) {
+  llvm::SHA256 digest;
+  digest.update(llvm::StringRef(ir));
+  return llvm::toHex(digest.final(), true);
 }
 
 [[nodiscard]] std::string_view
@@ -467,6 +476,50 @@ private:
       generator.seed(seed);
     }
     ActionMask suppressed{};
+    EpisodeContext episode(options_.reactiveStop);
+    ::mlir::OwningOpRef<::mlir::ModuleOp> incumbent;
+    const auto scoreCurrent = [&]() -> std::optional<double> {
+      const auto analysis = analyzeCircuit(
+          getAnalysis<::mlir::qco::QCOCircuitAnalysis>(), target);
+      if (failed(analysis) || !analysis->state.mapped ||
+          !analysis->state.routed || !analysis->state.synthesized) {
+        return std::nullopt;
+      }
+      ::mlir::OpPassManager verification(::mlir::ModuleOp::getOperationName());
+      verification.addPass(::mlir::qco::createVerifyTargetConformance(target));
+      if (failed(runPipeline(verification, module))) {
+        return std::nullopt;
+      }
+      const auto fidelity =
+          getAnalysis<::mlir::qco::QCOCircuitAnalysis>().expectedFidelity(
+              target);
+      return succeeded(fidelity) ? std::optional<double>(*fidelity)
+                                 : std::nullopt;
+    };
+    const auto recordResult = [&](const Action action, const bool changed) {
+      if (episode.recordResult(action, changed, scoreCurrent())) {
+        incumbent = ::mlir::OwningOpRef<::mlir::ModuleOp>(
+            ::mlir::cast<::mlir::ModuleOp>(module->clone()));
+      }
+    };
+    const auto finishModel = [&](const std::string_view reason) {
+      if (options_.trace) {
+        llvm::errs() << "[mqt-predictor] stop=" << reason
+                     << " incumbent=" << static_cast<bool>(incumbent) << '\n';
+      }
+      if (!incumbent) {
+        return ::mlir::failure();
+      }
+      module->setAttrs(incumbent.get()->getAttrs());
+      module->getRegion(0).takeBody(incumbent->getBodyRegion());
+      if (options_.trace) {
+        llvm::errs() << "[mqt-predictor] terminal_expected_fidelity="
+                     << llvm::format("%.17g", *episode.incumbentFidelity())
+                     << " incumbent_ir_sha256="
+                     << irChecksum(moduleFingerprint(module)) << '\n';
+      }
+      return ::mlir::success();
+    };
     for (std::size_t step = 0; step < options_.maxSteps; ++step) {
       auto analysis = analyzeCircuit(
           getAnalysis<::mlir::qco::QCOCircuitAnalysis>(), target);
@@ -475,12 +528,21 @@ private:
           llvm::errs() << "[mqt-predictor] unsupported QCO structure at step "
                        << step << '\n';
         }
-        return ::mlir::failure();
+        return model != nullptr ? finishModel("analysis-error")
+                                : ::mlir::failure();
       }
       const auto moduleBefore = moduleFingerprint(module);
-      const auto legal = model != nullptr && step == 0
-                             ? legalActions(CompilerState{}, suppressed)
-                             : legalActions(analysis->state, suppressed);
+      auto legal = model != nullptr && step == 0
+                       ? legalActions(CompilerState{}, suppressed)
+                       : legalActions(analysis->state, suppressed);
+      if (model != nullptr) {
+        const auto controlled =
+            episode.observe(analysis->features.values, legal);
+        if (!controlled) {
+          return finishModel("reactive-stop");
+        }
+        legal = *controlled;
+      }
       const auto decision =
           model != nullptr
               ? options_.deterministicPolicy
@@ -488,11 +550,17 @@ private:
                     : model->sample(analysis->features.values, legal, generator)
               : policy.select(analysis->features.values, legal);
       if (!decision) {
-        return ::mlir::failure();
+        return model != nullptr ? finishModel("no-action") : ::mlir::failure();
       }
       if (decision->action == Action::Terminate) {
         traceDecision(step, *analysis, *decision, target, targetFingerprint,
-                      legal, model);
+                      legal, model, moduleBefore);
+        if (model != nullptr) {
+          recordResult(decision->action, false);
+          if (incumbent) {
+            return finishModel("explicit-terminate");
+          }
+        }
         ::mlir::OpPassManager verification(
             ::mlir::ModuleOp::getOperationName());
         verification.addPass(
@@ -515,10 +583,11 @@ private:
         return ::mlir::success();
       }
       traceDecision(step, *analysis, *decision, target, targetFingerprint,
-                    legal, model);
+                    legal, model, moduleBefore);
 
       if (failed(runAction(module, decision->action, target))) {
-        return ::mlir::failure();
+        return model != nullptr ? finishModel("action-error")
+                                : ::mlir::failure();
       }
       const auto changed = moduleBefore != moduleFingerprint(module);
       if (changed) {
@@ -530,6 +599,9 @@ private:
                        << actionName(decision->action) << '\n';
         }
       }
+      if (model != nullptr) {
+        recordResult(decision->action, changed);
+      }
       if (step + 1 == options_.maxSteps) {
         if (options_.trace) {
           llvm::errs() << "[mqt-predictor] "
@@ -537,7 +609,8 @@ private:
                        << " episode truncated after " << options_.maxSteps
                        << " policy decisions\n";
         }
-        return ::mlir::failure();
+        return model != nullptr ? finishModel("budget-exhausted")
+                                : ::mlir::failure();
       }
     }
     return ::mlir::failure();
@@ -586,7 +659,8 @@ private:
   void traceDecision(const std::size_t step, const CircuitAnalysis& analysis,
                      const Decision& decision, const Target& target,
                      const std::string_view targetFingerprint,
-                     const ActionMask& legal, const PolicyModel* model) const {
+                     const ActionMask& legal, const PolicyModel* model,
+                     const std::string_view ir) const {
     if (!options_.trace) {
       return;
     }
@@ -615,7 +689,9 @@ private:
             llvm::errs() << " sampling_seed=entropy";
           }
         }
-        llvm::errs() << '\n';
+        llvm::errs() << " controller="
+                     << (options_.reactiveStop ? "reactive-stop" : "baseline")
+                     << '\n';
       }
     }
     llvm::errs() << "[mqt-predictor] step=" << step
@@ -636,10 +712,28 @@ private:
       if (index != 0) {
         llvm::errs() << ',';
       }
-      llvm::errs() << FEATURE_NAMES[index] << '='
-                   << analysis.features.values[index];
+      llvm::errs() << FEATURE_NAMES[index] << '=';
+      if (model != nullptr) {
+        llvm::errs() << llvm::format("%.9g", analysis.features.values[index]);
+      } else {
+        llvm::errs() << analysis.features.values[index];
+      }
     }
-    llvm::errs() << "}\n";
+    llvm::errs() << '}';
+    if (model != nullptr) {
+      llvm::errs() << " logits={";
+      for (std::size_t action = 0; action < NUM_ACTIONS; ++action) {
+        llvm::errs() << (action == 0 ? "" : ",")
+                     << llvm::format("%.9g", decision.logits[action]);
+      }
+      llvm::errs() << "} noise={";
+      for (std::size_t action = 0; action < NUM_ACTIONS; ++action) {
+        llvm::errs() << (action == 0 ? "" : ",")
+                     << llvm::format("%.17g", decision.samplingNoise[action]);
+      }
+      llvm::errs() << "} ir_sha256=" << irChecksum(ir);
+    }
+    llvm::errs() << '\n';
   }
 
   PredictorOptions options_;

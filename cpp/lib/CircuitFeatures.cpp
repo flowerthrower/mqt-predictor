@@ -47,7 +47,7 @@ analyzeCircuit(const ::mlir::qco::QCOCircuitAnalysis& analysis,
   FeatureVector values{};
   if (metrics->totalOperations > 0) {
     for (const auto& [operationName, count] : metrics->operationCounts) {
-      for (std::size_t index = 0; index < NUM_FEATURES; ++index) {
+      for (std::size_t index = 0; index < NUM_CIRCUIT_FEATURES; ++index) {
         const auto featureName = FEATURE_NAMES[index];
         if (llvm::StringRef(operationName) ==
             llvm::StringRef(featureName.data(), featureName.size())) {

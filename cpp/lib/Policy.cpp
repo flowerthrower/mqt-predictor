@@ -39,6 +39,68 @@ constexpr auto BIASES =
 
 } // namespace
 
+std::optional<ActionMask> EpisodeContext::observe(FeatureVector& features,
+                                                  ActionMask legal) {
+  std::string key(reinterpret_cast<const char*>(features.data()),
+                  NUM_CIRCUIT_FEATURES * sizeof(float));
+  for (const auto enabled : legal) {
+    key.push_back(static_cast<char>(enabled));
+  }
+  visit_ = &visits_[key];
+  const auto fraction = [](const std::size_t count) {
+    return static_cast<float>(std::min(count, MAX_STEPS)) /
+           static_cast<float>(MAX_STEPS);
+  };
+  std::fill(features.begin() + NUM_CIRCUIT_FEATURES, features.end(), 0.0F);
+  features[51] = fraction(step_);
+  features[52] = incumbent_.has_value() ? 1.0F : 0.0F;
+  features[53] = static_cast<float>(current_.value_or(0.0));
+  features[54] = static_cast<float>(incumbent_.value_or(0.0));
+  features[55] = incumbent_ ? fraction(step_ - incumbentStep_) : 0.0F;
+  features[56] = fraction(visit_->count);
+  features[57] = changed_ ? 1.0F : 0.0F;
+  if (previousAction_) {
+    features[58 + index(*previousAction_)] = 1.0F;
+  }
+  ++visit_->count;
+
+  if (reactiveStop_ && visit_->action) {
+    constexpr auto absent = -std::numeric_limits<double>::infinity();
+    if (incumbent_.value_or(absent) > visit_->best.value_or(absent) + 1e-15) {
+      visit_->recurrences = 0;
+    } else {
+      ++visit_->recurrences;
+      if (visit_->recurrences >= 2 && incumbent_) {
+        return std::nullopt;
+      }
+      const auto tenure = 1U
+                          << std::min<std::size_t>(2, visit_->recurrences - 1);
+      auto& before = visit_->tabuBefore[index(*visit_->action)];
+      before = std::max(before, step_ + tenure);
+    }
+  }
+  for (std::size_t action = 0; action < index(Action::Terminate); ++action) {
+    legal[action] &= step_ >= visit_->tabuBefore[action];
+  }
+  return legal;
+}
+
+bool EpisodeContext::recordResult(const Action action, const bool changed,
+                                  const std::optional<double> fidelity) {
+  visit_->action = action;
+  visit_->best = incumbent_;
+  previousAction_ = action;
+  changed_ = changed;
+  ++step_;
+  current_ = fidelity;
+  if (fidelity && (!incumbent_ || *fidelity > *incumbent_ + 1e-15)) {
+    incumbent_ = fidelity;
+    incumbentStep_ = step_;
+    return true;
+  }
+  return false;
+}
+
 std::string_view actionName(const Action action) {
   const auto actionIndex = index(action);
   if (actionIndex >= ACTION_NAMES.size()) {

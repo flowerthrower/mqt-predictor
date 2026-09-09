@@ -31,6 +31,7 @@ struct PredictorOptions {
   std::string modelPath;
   bool trace = false;
   bool deterministicPolicy = false;
+  bool reactiveStop = true;
   std::optional<std::uint64_t> samplingSeed;
 };
 

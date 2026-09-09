@@ -159,19 +159,28 @@ std::optional<Decision> PolicyModel::sample(const FeatureVector& features,
     return std::nullopt;
   }
 
-  const auto maximum =
-      *std::max_element(decision->logits.begin(), decision->logits.end());
-  std::array<double, NUM_ACTIONS> probabilities{};
+  std::optional<std::size_t> selected;
+  auto maximum = -std::numeric_limits<double>::infinity();
   for (std::size_t action = 0; action < NUM_ACTIONS; ++action) {
+    // Gumbel-max matches the study's categorical sampler. Keep draws in the
+    // trace so Python can replay the same noise without sharing an RNG engine.
+    const auto uniform =
+        (static_cast<double>(generator() >> 12U) + 0.5) * 0x1p-52;
+    decision->samplingNoise[action] = -std::log(-std::log(uniform));
     if (legal[action]) {
-      probabilities[action] =
-          std::exp((static_cast<double>(decision->logits[action]) - maximum) /
-                   static_cast<double>(temperature));
+      const auto score = static_cast<double>(decision->logits[action]) /
+                             static_cast<double>(temperature) +
+                         decision->samplingNoise[action];
+      if (!selected || score > maximum) {
+        selected = action;
+        maximum = score;
+      }
     }
   }
-  std::discrete_distribution<std::size_t> distribution(probabilities.begin(),
-                                                       probabilities.end());
-  decision->action = static_cast<Action>(distribution(generator));
+  if (!selected) {
+    return std::nullopt;
+  }
+  decision->action = static_cast<Action>(*selected);
   return decision;
 }
 

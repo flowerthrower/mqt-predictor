@@ -57,6 +57,7 @@ void printHelp(llvm::raw_ostream& output) {
          "  --deterministic-policy\n"
          "                         Select the highest-logit model action\n"
          "  --sampling-seed=<n>   Seed sampled actions (default: entropy)\n"
+         "  --controller=<name>   reactive-stop (default) or baseline\n"
          "  --trace               Print features, states, and actions\n"
          "  --help                Show this help\n";
 }
@@ -121,6 +122,16 @@ parseSize(const std::string_view value) {
         return std::nullopt;
       }
       options.predictor.modelPath = path;
+      continue;
+    }
+    if (argument.starts_with("--controller=")) {
+      const auto name =
+          argument.substr(std::string_view("--controller=").size());
+      if (name != "baseline" && name != "reactive-stop") {
+        llvm::errs() << "unknown controller: " << name << '\n';
+        return std::nullopt;
+      }
+      options.predictor.reactiveStop = name == "reactive-stop";
       continue;
     }
     if (argument.starts_with("--target=")) {

@@ -16,6 +16,8 @@
 #include <llvm/Support/Error.h>
 #include <mlir/Compiler/Target.h>
 
+#include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <iostream>
 #include <optional>
@@ -41,14 +43,16 @@ using namespace mqt::predictor::compiler;
 int main() {
   using namespace mqt::predictor::compiler;
 
-  if (EXPERIMENT_SCHEMA != "mqt-predictor-core-stages/6" ||
-      FEATURE_NAMES.size() != 51 || FEATURE_NAMES[0] != "c3sqrtx" ||
-      FEATURE_NAMES[28] != "r" || FEATURE_NAMES[50] != "z" ||
-      MAX_STEPS != 20 ||
+  if (EXPERIMENT_SCHEMA != "mqt-predictor-markov-stop-features/1" ||
+      FEATURE_NAMES.size() != 64 || NUM_CIRCUIT_FEATURES != 51 ||
+      FEATURE_NAMES[0] != "c3sqrtx" || FEATURE_NAMES[28] != "r" ||
+      FEATURE_NAMES[50] != "z" || FEATURE_NAMES[51] != "zz_decision_fraction" ||
+      FEATURE_NAMES[63] != "zz_previous_action_5" || MAX_STEPS != 20 ||
       PredictorOptions{}.maxSteps != 20 ||
       PredictorOptions{}.deterministicPolicy ||
+      !PredictorOptions{}.reactiveStop ||
       PredictorOptions{}.samplingSeed.has_value()) {
-    std::cerr << "v3 observation contract is inconsistent\n";
+    std::cerr << "native observation contract is inconsistent\n";
     return EXIT_FAILURE;
   }
 
@@ -101,6 +105,80 @@ int main() {
     return EXIT_FAILURE;
   }
   if (!expectAction(policy, features, mask, Action::Terminate)) {
+    return EXIT_FAILURE;
+  }
+
+  EpisodeContext episode;
+  const auto circuitFeatures = features;
+  if (episode.observe(features, mask) != mask || features != circuitFeatures ||
+      !episode.recordResult(Action::FuseSingleQubitUnitaryRuns, true, 0.8)) {
+    std::cerr << "initial episode context is inconsistent\n";
+    return EXIT_FAILURE;
+  }
+  const auto expectContext = [&](const std::array<float, 13>& expected) {
+    return std::equal(features.begin(), features.begin() + NUM_CIRCUIT_FEATURES,
+                      circuitFeatures.begin()) &&
+           std::equal(expected.begin(), expected.end(),
+                      features.begin() + NUM_CIRCUIT_FEATURES);
+  };
+  if (episode.observe(features, mask) != mask ||
+      !expectContext({0.05F, 1, 0.8F, 0.8F, 0, 0.05F, 1, 0, 1, 0, 0, 0, 0}) ||
+      episode.recordResult(Action::FuseSingleQubitUnitaryRuns, false, 0.7)) {
+    std::cerr << "incumbent improvement did not release the repeated state\n";
+    return EXIT_FAILURE;
+  }
+  auto tabuMask = mask;
+  tabuMask[1] = false;
+  if (episode.observe(features, mask) != tabuMask ||
+      !expectContext({0.1F, 1, 0.7F, 0.8F, 0.05F, 0.1F, 0, 0, 1, 0, 0, 0, 0}) ||
+      episode.recordResult(Action::FuseTwoQubitGates, true, std::nullopt)) {
+    std::cerr
+        << "first non-improving recurrence did not mask the previous action\n";
+    return EXIT_FAILURE;
+  }
+  if (episode.observe(features, mask) ||
+      !expectContext({0.15F, 1, 0, 0.8F, 0.1F, 0.15F, 1, 0, 0, 1, 0, 0, 0}) ||
+      episode.incumbentFidelity() != 0.8) {
+    std::cerr
+        << "second non-improving recurrence did not request incumbent stop\n";
+    return EXIT_FAILURE;
+  }
+
+  EpisodeContext baseline(false);
+  features = circuitFeatures;
+  for (std::size_t step = 0; step < MAX_STEPS; ++step) {
+    if (baseline.observe(features, mask) != mask ||
+        features[51] != static_cast<float>(step) / 20.0F ||
+        features[56] != static_cast<float>(step) / 20.0F) {
+      std::cerr << "baseline controller changed the mask or visit context\n";
+      return EXIT_FAILURE;
+    }
+    static_cast<void>(
+        baseline.recordResult(Action::FuseTwoQubitGates, false, 0.8));
+  }
+
+  EpisodeContext unscored;
+  features = circuitFeatures;
+  const ActionMask allTransforms{true, true, true, true, true, false};
+  const std::array expectedMasks{
+      allTransforms, ActionMask{false, true, true, true, true, false},
+      ActionMask{true, false, true, true, true, false},
+      ActionMask{true, false, false, true, true, false},
+      ActionMask{false, true, false, true, true, false}};
+  const std::array actions{
+      Action::MergeSingleQubitRotationGates, Action::FuseSingleQubitUnitaryRuns,
+      Action::FuseTwoQubitGates, Action::MergeSingleQubitRotationGates,
+      Action::FuseSingleQubitUnitaryRuns};
+  for (std::size_t step = 0; step < actions.size(); ++step) {
+    if (unscored.observe(features, allTransforms) != expectedMasks[step] ||
+        unscored.recordResult(actions[step], true, std::nullopt)) {
+      std::cerr
+          << "unscored recurrence stopped or used the wrong mask tenure\n";
+      return EXIT_FAILURE;
+    }
+  }
+  if (unscored.observe(features, mask) != mask || features[56] != 0.0F) {
+    std::cerr << "visible-state identity ignored the base legal mask\n";
     return EXIT_FAILURE;
   }
 

@@ -184,8 +184,33 @@ if(BUILD_TESTING)
       mqt-predictor-iqm-garnet-onnx-model-e2e
       PROPERTIES
         PASS_REGULAR_EXPRESSION
-        "policy=model model_schema=mqt-predictor-onnx-policy/1.*sampling=stochastic sampling_seed=19.*r=8.181818e-01.*step=4 action=fuse-single-qubit-unitary-runs.*legal=111010.*no-effect action=fuse-single-qubit-unitary-runs.*step=5 action=synthesize-for-target.*legal=101010.*step=6 action=fuse-two-qubit-gates.*legal=111001.*action=terminate.*terminal_expected_fidelity=9.231927e-01"
+        "policy=model model_schema=mqt-predictor-onnx-policy/1.*sampling=stochastic sampling_seed=19 controller=reactive-stop.*step=0 action=place-and-route.*legal=111110.*step=1 action=synthesize-for-target.*legal=111010.*zz_previous_action_3=1.*step=2 action=terminate.*legal=111001.*r=0.818181813.*zz_incumbent_available=1.*zz_current_fidelity=0.922627211.*stop=explicit-terminate incumbent=1.*terminal_expected_fidelity=0.92262719039999996"
         FAIL_REGULAR_EXPRESSION "falling back;truncated;error:")
+
+    add_test(
+      NAME mqt-predictor-model-keeps-incumbent-at-horizon
+      COMMAND
+        mqt-predictor-cc --trace --deterministic-policy --max-steps=2
+        --qdmi-device=mqt.sc.iqm.garnet
+        --model=${CMAKE_CURRENT_SOURCE_DIR}/models/iqm-garnet-ppo-tanh64x64.onnx
+        -o ${CMAKE_CURRENT_BINARY_DIR}/controlled-u-incumbent.mlir
+        ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/controlled-u-from-qiskit.mlir)
+    set_tests_properties(
+      mqt-predictor-model-keeps-incumbent-at-horizon
+      PROPERTIES
+        PASS_REGULAR_EXPRESSION
+        "step=1 action=synthesize-for-target.*zz_decision_fraction=0.0500000007.*stop=budget-exhausted incumbent=1.*terminal_expected_fidelity=0.92262719039999996"
+        FAIL_REGULAR_EXPRESSION "falling back;action=terminate;error:")
+
+    add_test(
+      NAME mqt-predictor-incumbent-matches-explicit-output
+      COMMAND ${CMAKE_COMMAND} -E compare_files
+        ${CMAKE_CURRENT_BINARY_DIR}/controlled-u-incumbent.mlir
+        ${CMAKE_CURRENT_BINARY_DIR}/controlled-u-iqm-garnet-onnx-model.mlir)
+    set_tests_properties(
+      mqt-predictor-incumbent-matches-explicit-output
+      PROPERTIES DEPENDS
+        "mqt-predictor-model-keeps-incumbent-at-horizon;mqt-predictor-iqm-garnet-onnx-model-e2e")
   endif()
 
   add_test(
@@ -284,7 +309,7 @@ if(BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/test/Inputs/wide.qasm)
   set_tests_properties(
     mqt-predictor-wide-e2e
-    PROPERTIES PASS_REGULAR_EXPRESSION "schema=mqt-predictor-core-stages/6"
+    PROPERTIES PASS_REGULAR_EXPRESSION "schema=mqt-predictor-markov-stop-features/1"
                FAIL_REGULAR_EXPRESSION "unsupported QCO structure;error:")
 
   add_test(

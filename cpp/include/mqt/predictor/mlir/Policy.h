@@ -13,14 +13,17 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <optional>
+#include <string>
 #include <string_view>
 
 namespace mqt::predictor::compiler {
 
 inline constexpr std::string_view EXPERIMENT_SCHEMA =
-    "mqt-predictor-core-stages/6";
-inline constexpr std::size_t NUM_FEATURES = 51;
+    "mqt-predictor-markov-stop-features/1";
+inline constexpr std::size_t NUM_CIRCUIT_FEATURES = 51;
+inline constexpr std::size_t NUM_FEATURES = 64;
 inline constexpr std::array<std::string_view, NUM_FEATURES> FEATURE_NAMES{
     "c3sqrtx",
     "c3x",
@@ -72,7 +75,20 @@ inline constexpr std::array<std::string_view, NUM_FEATURES> FEATURE_NAMES{
     "u3",
     "x",
     "y",
-    "z"};
+    "z",
+    "zz_decision_fraction",
+    "zz_incumbent_available",
+    "zz_current_fidelity",
+    "zz_incumbent_fidelity",
+    "zz_incumbent_age_fraction",
+    "zz_visible_visit_fraction",
+    "zz_last_action_changed_ir",
+    "zz_previous_action_0",
+    "zz_previous_action_1",
+    "zz_previous_action_2",
+    "zz_previous_action_3",
+    "zz_previous_action_4",
+    "zz_previous_action_5"};
 inline constexpr double DEPTH_NORMALIZATION_MAX = 999'999.0;
 inline constexpr std::size_t MAX_STEPS = 20;
 
@@ -109,6 +125,43 @@ struct CompilerState {
 struct Decision {
   Action action;
   std::array<float, NUM_ACTIONS> logits{};
+  std::array<double, NUM_ACTIONS> samplingNoise{};
+};
+
+/** The study's episode context and optional reactive-stop controller. */
+class EpisodeContext final {
+public:
+  explicit EpisodeContext(bool reactiveStop = true)
+      : reactiveStop_(reactiveStop) {}
+
+  // Fill context before counting this visit. nullopt requests incumbent stop.
+  [[nodiscard]] std::optional<ActionMask> observe(FeatureVector& features,
+                                                  ActionMask legal);
+  // Record the selected action and result; return whether the incumbent
+  // improved.
+  [[nodiscard]] bool recordResult(Action action, bool changed,
+                                  std::optional<double> fidelity);
+  [[nodiscard]] std::optional<double> incumbentFidelity() const {
+    return incumbent_;
+  }
+
+private:
+  struct Visit {
+    std::size_t count = 0;
+    std::size_t recurrences = 0;
+    std::optional<Action> action;
+    std::optional<double> best;
+    std::array<std::size_t, NUM_ACTIONS> tabuBefore{};
+  };
+  bool reactiveStop_;
+  std::size_t step_ = 0;
+  std::size_t incumbentStep_ = 0;
+  std::optional<double> current_;
+  std::optional<double> incumbent_;
+  std::optional<Action> previousAction_;
+  bool changed_ = false;
+  std::map<std::string, Visit> visits_;
+  Visit* visit_ = nullptr;
 };
 
 [[nodiscard]] std::string_view actionName(Action action);

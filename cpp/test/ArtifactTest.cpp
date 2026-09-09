@@ -13,6 +13,8 @@
 
 #include <llvm/Support/Error.h>
 
+#include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -115,8 +117,20 @@ int main(const int argc, char** argv) {
   const auto secondSample = model->sample(features, legal, secondGenerator);
   if (!firstSample || !secondSample ||
       firstSample->action != secondSample->action ||
-      firstSample->logits != secondSample->logits) {
+      firstSample->logits != secondSample->logits ||
+      firstSample->samplingNoise != secondSample->samplingNoise) {
     std::cerr << "seeded stochastic inference is not reproducible\n";
+    return EXIT_FAILURE;
+  }
+  std::array<double, NUM_ACTIONS> scores{};
+  for (std::size_t action = 0; action < NUM_ACTIONS; ++action) {
+    scores[action] =
+        firstSample->logits[action] + firstSample->samplingNoise[action];
+  }
+  if (static_cast<std::size_t>(firstSample->action) !=
+      static_cast<std::size_t>(std::max_element(scores.begin(), scores.end()) -
+                               scores.begin())) {
+    std::cerr << "stochastic decision does not reproduce Gumbel-max sampling\n";
     return EXIT_FAILURE;
   }
 

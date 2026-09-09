@@ -10,7 +10,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import struct
 from inspect import signature
 from pathlib import Path
 
@@ -36,7 +38,6 @@ from mqt.predictor.compiled.policy import (
     V3_FEATURE_NAMES,
     LinearPolicy,
     export_linear_policy,
-    parameter_checksum,
 )
 
 INPUTS = Path(__file__).parents[2] / "cpp" / "test" / "Inputs"
@@ -66,14 +67,23 @@ def test_minimal_training_is_deterministic() -> None:
     np.testing.assert_array_equal(first.policy.bias, second.policy.bias)
 
 
-def test_checked_in_artifact_matches_python_contract() -> None:
-    """The checked-in artifact matches its target and parameter digests."""
+def test_checked_in_artifact_matches_native_context_contract() -> None:
+    """The native fixture extends the 51 circuit features with episode context."""
     artifact = json.loads((INPUTS / "line-4-policy.json").read_text(encoding="utf-8"))
     weights = np.asarray(artifact["parameters"]["weights"], dtype=np.float32)
     bias = np.asarray(artifact["parameters"]["bias"], dtype=np.float32)
 
     assert artifact["compatibility"]["target_fingerprint"] == target_fingerprint(INPUTS / "line-4-target.json")
-    assert artifact["parameters_sha256"] == parameter_checksum(weights, bias)
+    assert artifact["observation_schema"] == "mqt-predictor-markov-stop-features/1"
+    assert tuple(artifact["feature_names"][:51]) == FEATURE_NAMES
+    assert weights.shape == (6, 64)
+    payload = (
+        b"mqt-predictor-native-policy/1\0"
+        + struct.pack("<II", 64, 6)
+        + weights.astype("<f4").tobytes()
+        + bias.astype("<f4").tobytes()
+    )
+    assert artifact["parameters_sha256"] == f"sha256:{hashlib.sha256(payload).hexdigest()}"
     assert artifact["training"]["epochs"] == 1
     assert artifact["training"]["objective"] == (
         "manually curated ABI smoke samples; not a reproducible Core trajectory or performance dataset"

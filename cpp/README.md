@@ -8,16 +8,16 @@ Runtime evaluates the actor inside the MLIR pass, while MQT Core applies every
 selected transformation. Qiskit, TKET, BQSKit, and other SDK compiler passes are
 not policy actions.
 
-The alignment target is Predictor pull request
+The original alignment target was Predictor pull request
 [#798](https://github.com/munich-quantum-toolkit/predictor/pull/798) at commit
-`9446b53fad345f27c04f65193e23bcf4c803f9d1`. The experiment preserves its flat
-observation, PPO architecture and hyperparameters, episode horizon, terminal
-reward timing, and stochastic inference. It deliberately replaces that
-predictor's action set and circuit state with Core-only actions over one
-persistent QCO program.
+`9446b53fad345f27c04f65193e23bcf4c803f9d1`. The deployed follow-up study actor
+keeps its 51 flat circuit features, PPO architecture, 20-decision horizon, and
+stochastic inference, and adds 13 episode-context inputs. It uses Core-only
+actions over one persistent QCO program, a small transform cost in training, and
+best verified circuit retention during deployment.
 
-The policy-training and export source revision is
-`54e8b6a87900fa11987b81fb13779e6ec5a3fbe5`. The Python environment and compiled
+The follow-up study uses Predictor source revision
+`a2ae0470fc589dc88428d47dc33aad12c210f6ff`. The Python environment and compiled
 runtime share this exact Core compatibility identity:
 
 ```text
@@ -38,15 +38,15 @@ sha256:d9be5c92985ee59418ff58317a2a7ce2c24a6c08a515fe34d192d3dde8f00599
 
 ```text
 Python training
-  Qiskit circuit -> Core QCO -> CorePredictorEnv
+  Qiskit circuit -> Core QCO -> study wrapper over CorePredictorEnv
     -> Core QCO analysis after each action
-    -> Core target-calibration fidelity at termination
-    -> MaskablePPO actor  51 -> 64 -> 64 -> 6
-    -> MaskablePPO critic 51 -> 64 -> 64 -> 1  (training only)
+    -> Core target-calibration fidelity + episode context
+    -> MaskablePPO actor  64 -> 64 -> 64 -> 6
+    -> MaskablePPO critic 64 -> 64 -> 64 -> 1  (training only)
     -> actor ONNX
 
 C++ deployment
-  raw unmapped QCO ModuleOp -> cached Core QCO analysis + legal-action mask
+  raw unmapped QCO ModuleOp -> Core analysis + episode context + controlled mask
     -> ONNX Runtime logits -> masked categorical sample
     -> selected Core QCO pass -> invalidated/recomputed analysis -> same ModuleOp
 ```
@@ -73,16 +73,25 @@ is exposed only for a mapped, routed, target-native program. An action that
 leaves the IR unchanged is additionally masked until another action changes the
 IR; several no-op masks may accumulate. Every selection still consumes one
 decision. Core separately verifies target conformance before accepting
-termination. The actor receives no pass-history feature and no budget is
-reserved for later actions.
+termination. No budget is reserved for later actions.
 
 The horizon is 20 total policy decisions, including `terminate`. Termination may
-succeed as the twentieth decision. A twentieth non-termination action ends the
-episode as a terminal failure, which prevents PPO from bootstrapping beyond the
-hard deployment horizon. Non-terminal actions return zero reward. Successful
-termination returns the absolute expected fidelity; pass errors and timeouts
-truncate with zero reward. This is the terminal-only reward contract of #798,
-not the intermediate-reward change from later work.
+succeed as the twentieth decision. Training retains terminal expected fidelity
+and charges 0.0001 per transform, without potential-based intermediate rewards.
+At deployment, Core scores each already-conformant state and retains the first
+strictly best circuit (improvement tolerance `1e-15`). No canonical compilation
+is needed for intermediate scoring. Termination, reactive stopping, or budget
+exhaustion returns that incumbent, even if the current circuit is worse or
+non-conformant. Context fractions always use the trained horizon of 20,
+including when a smaller runtime budget is requested.
+
+The default reactive-stop controller identifies a visible state by the 51
+`float32` circuit features and the base legal mask. Revisiting without incumbent
+improvement temporarily masks that state's previous transform. A second
+non-improving recurrence stops once an incumbent exists. Before one exists, mask
+tenure doubles up to four decisions. An improvement resets the recurrence count.
+Termination is never controller-masked. `--controller=baseline` disables this
+controller but still supplies context and preserves the incumbent.
 
 Expected fidelity is computed directly from the same Core `CompilerTarget`
 snapshot used for compilation. The target is populated by the QDMI device and
@@ -95,10 +104,8 @@ product, not scheduled durations and qubit-coherence decay.
 
 ## Policy ABI
 
-Schema `mqt-predictor-core-stages/6` contains exactly 51 ordered `float32`
-features. Python exposes them as a Gymnasium `Dict` of scalar `Box(0, 1)`
-spaces; the effective Stable-Baselines3 concatenation order and the C++/ONNX
-order are:
+Schema `mqt-predictor-markov-stop-features/1` contains exactly 64 ordered
+`float32` features. The first 51 retain the baseline order:
 
 ```text
 c3sqrtx, c3x, c4x, ccx, ch, cp, critical_depth, crx, cry, crz,
@@ -112,12 +119,26 @@ These are 44 operation frequencies, target-relative logical-qubit count,
 log-normalized depth, and the five structural features `critical_depth`,
 `entanglement_ratio`, `parallelism`, `program_communication`, and `liveness`.
 Values are clamped to `[0, 1]`. Barriers are omitted, while unknown operations
-remain in the frequency denominator. The observation contains no step fraction,
-action counts, pass history, or other hidden state.
+remain in the frequency denominator. The remaining inputs, in order, are:
+
+```text
+zz_decision_fraction, zz_incumbent_available, zz_current_fidelity,
+zz_incumbent_fidelity, zz_incumbent_age_fraction, zz_visible_visit_fraction,
+zz_last_action_changed_ir, zz_previous_action_0, zz_previous_action_1,
+zz_previous_action_2, zz_previous_action_3, zz_previous_action_4,
+zz_previous_action_5
+```
+
+Unavailable scores are zero, visits count prior observations of the same visible
+state, and previous action is one-hot. The driver supplies this context; circuit
+features and expected fidelity still come directly from Core's QCO analysis. The
+frozen study wrapper provides the matching Python observation. The original
+`CorePredictorEnv` and its legacy export helpers still describe the 51-feature
+baseline, not the deployed actor.
 
 The PPO actor and critic each have two 64-unit Tanh hidden layers and retain
 Stable-Baselines3 orthogonal initialization. Only the actor is exported. Its
-`51 -> 64 -> 64 -> 6` graph contains 7,878 `float32` parameters and returns six
+`64 -> 64 -> 64 -> 6` graph contains 8,710 `float32` parameters and returns six
 unmasked logits. The host applies the legal-action mask.
 
 Native inference samples the masked softmax at temperature 1 by default. With no
@@ -126,7 +147,8 @@ sampling option, the C++ runtime seeds its generator from system entropy.
 `--deterministic-policy` selects the highest legal logit. Python and C++ use
 different random-number engines, so the same integer seed does not promise an
 identical cross-language action trace; it defines independent samples from the
-same masked categorical policy.
+same masked categorical policy. The native sampler uses Gumbel-max and includes
+its noise draws in `--trace`, allowing Python to replay identical randomness.
 
 The loader checks the ONNX schema, feature and action order, target fingerprint,
 complete Core compatibility identity, provenance, tensor interface, and finite
@@ -201,7 +223,34 @@ These compiled-dependency Python tests and the CMake/CTest build are optional
 local validation. Normal Nox/CI sessions do not install the `compiled` group or
 configure this C++ experiment.
 
-## Training and evaluation
+## Deployed study checkpoint
+
+The checked-in actor is H1-D0-C1 at 100,352 timesteps, using the first
+preregistered screening seed, 1266875488. Selection did not use confirmation
+performance. Training uses context, no potential shaping, transform cost 0.0001,
+and the existing two-64-unit Tanh PPO architecture. Deployment repackages only
+metadata; neither the graph nor any learned parameter was changed.
+
+```text
+source ONNX: sha256:86eb159ffc5208236650c501a6c75156b55615de9179f7621327810471e719d6
+deployed:    sha256:4607d50ec5347decca550a79e2a222d4526648954edd4a676d34afc403ad9f8c
+parameters: sha256:5550dbe8caa94123dea2d60f625fd14a2a3434325cee284dbbb6a2853c49e5ab
+```
+
+The follow-up's 64 paired confirmation training seeds improved mean stochastic
+expected fidelity from 0.211460 to 0.217501 under reactive stopping. This is
+evidence for the training configuration, not a guaranteed score for this single
+checkpoint or a comparison against Core's canonical pipeline.
+
+Matched Release validation covered 1,010 episodes and 5,808 decisions across the
+440 training entries, 47 broad Bench entries, and 24 confirmation entries.
+Features, masks, actions, intermediate/returned IR, and expected fidelity agreed
+exactly with the frozen Python evaluator. Native ONNX logits matched Python ONNX
+Runtime exactly and the original SB3 actor within `2.861e-6`. All 866
+full-budget episodes produced a valid incumbent; shortened-budget diagnostics
+also exercised incumbent retention and canonical fallback without retraining.
+
+## Earlier 51-feature training and evaluation
 
 The Predictor compilation archive contains 500 QASM circuits. Exactly 440 have
 at most 20 qubits and form the full Garnet-compatible training corpus. The other
@@ -225,11 +274,10 @@ The training configuration matches #798: `MaskableMultiInputActorCriticPolicy`,
 rollout size 2,048, batch size 64, ten epochs per update, `gamma=0.98`, learning
 rate `3e-4`, two 64-unit Tanh actor layers, two 64-unit Tanh critic layers,
 orthogonal initialization, and otherwise the same Stable-Baselines3 defaults.
-Every episode uses the 20-decision horizon and terminal-only expected-fidelity
-reward. The checked-in actor predates the horizon correction above: max-step
-exhaustion was still reported as a truncation during that training run. Training
-used source revision `87ebb46aed758ede7c06f576eb78a873e9f63256` and Core
-identity
+Every episode used the 20-decision horizon and terminal-only expected-fidelity
+reward. That earlier actor predates the horizon correction: max-step exhaustion
+was still reported as a truncation during that training run. Training used
+source revision `87ebb46aed758ede7c06f576eb78a873e9f63256` and Core identity
 `99fd4d2ef93a8680ed17a9e7bed72bce77aaadce+patch.904aee31e1dc5f4796bb45c9931246cb72c9bedaa6aa6064a457d0b4de01aa66`.
 
 The fixed comparison schedule is `synthesize-for-target`,
@@ -238,9 +286,9 @@ The fixed comparison schedule is `synthesize-for-target`,
 target compilation pipeline. All scores are absolute expected fidelity, not a
 structural proxy.
 
-## Results
+### Earlier results
 
-The deployed factual-state ONNX actor has SHA-256
+The earlier factual-state ONNX actor had SHA-256
 `ac2069f022cdda15d33ef0e2502b85ba04765c8b5f441ee76dc25a5f9ceb197b`. Its new `r`
 input column is zero-initialized, so its logits remain unchanged until
 retraining. Its logits agree with the exported PyTorch actor within `3.58e-7`
@@ -288,9 +336,16 @@ process with an external watchdog. Embedders that require a hard wall-clock
 limit must provide the same process boundary; the 20-action horizon is not a
 wall-clock timeout.
 
+For Python/native trajectory comparisons, use matching Release builds of Core
+with the same compiler options. Debug versus Release synthesis can differ in
+floating-point angles and even gate counts, changing observations and scores
+despite an identical source revision. Native traces expose input/outputs via IR
+hashes, 64 features, legal masks, logits, and sampled noise for this check.
+
 For an ordinary model error or horizon exhaustion that returns control, the C++
-pass restores the original module and attempts Core's canonical target pipeline.
-This protects compilation, but evaluation still assigns the failed model episode
-zero rather than crediting it with the fallback's result. A pass that never
-returns cannot reach the in-process fallback before the external watchdog ends
-its process.
+pass returns the best verified incumbent if available. Otherwise it restores the
+original module and attempts Core's canonical target pipeline. Evaluation does
+not credit that canonical fallback to the policy. Uncalibrated smoke targets can
+still accept a verified explicit termination without an incumbent score. A pass
+that never returns cannot reach the in-process fallback before the external
+watchdog ends its process.

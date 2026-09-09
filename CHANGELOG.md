@@ -12,6 +12,9 @@ releases may include breaking changes.
 
 ### Changed
 
+- ✨ Deploy the 64-feature Core study actor with episode context, reactive
+  stopping, and best verified circuit retention in the native MLIR predictor
+  ([**@flowerthrower**])
 - ✨ Mask Core actions after exact IR no-ops until another action changes the IR
 - ✨ Replace composite BQSKit compilation actions with atomic passes ([#731])
   ([**@flowerthrower**])

@@ -6,6 +6,23 @@ of changes including minor and patch releases, please refer to the
 
 ## [Unreleased]
 
+### Experimental native Core policy
+
+The C++ predictor now requires 64 inputs with observation schema
+`mqt-predictor-markov-stop-features/1`: the existing 51 circuit features
+followed by 13 episode-context features. Old 51-input artifacts are rejected;
+use the retrained study actor in `cpp/models/iqm-garnet-ppo-tanh64x64.onnx`. Its
+graph and weights are unchanged from study checkpoint H1-D0-C1, seed 1266875488,
+step 100352. The original Python `CorePredictorEnv` remains the 51-feature
+baseline; its exports do not implement this new native observation contract.
+
+Model deployment defaults to `--controller=reactive-stop`;
+`--controller=baseline` disables controller masking/stopping but retains context
+and the best verified circuit. Native stochastic inference now uses Gumbel-max
+categorical sampling, so previous seeded native traces change. Seeds remain
+reproducible within the same runtime; Python and C++ do not share a
+random-number engine.
+
 ### Atomic BQSKit compilation actions
 
 The composite actions `BQSKitO2`, `BQSKitSynthesis`, and `BQSKitMapping` are no
