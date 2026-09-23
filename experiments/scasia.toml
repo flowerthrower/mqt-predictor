@@ -1,0 +1,55 @@
+# Copyright (c) 2023 - 2026 Chair for Design Automation, TUM
+# Copyright (c) 2025 - 2026 Munich Quantum Software Company GmbH
+# All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
+# Licensed under the MIT License
+
+# Paths are relative to this TOML file. Use a shared cluster scratch directory for output.
+assets = "assets"
+output = "../../scasia-runs"
+
+[experiment]
+objective = "estimated_success_probability"
+training_timesteps = 100000
+episode_actions = 32
+training_seed = 0
+evaluation_seed = 0
+evaluation_repetitions = 10
+checkpoint_steps = 2048
+reward_scale = 1.0
+no_effect_penalty = -0.001
+# Zero means all 41 evaluation circuits. A smaller value is for smoke tests only.
+evaluation_circuits = 0
+
+[worker]
+pass_timeout_seconds = 60.0
+startup_timeout_seconds = 120.0
+threads = 1
+bqskit_workers = 1
+
+[original]
+bqskit_port = 17472
+bqskit_worker_port = 17474
+
+[original.ppo]
+learning_rate = 0.0003
+n_steps = 2048
+batch_size = 64
+n_epochs = 10
+gamma = 0.98
+gae_lambda = 0.95
+clip_range = 0.2
+normalize_advantage = true
+ent_coef = 0.0
+vf_coef = 0.5
+max_grad_norm = 0.5
+# SB3 defaults: clip_range_vf = None, target_kl = None, two 64-unit Tanh layers.
+
+[paper]
+bqskit_port = 18472
+bqskit_worker_port = 18474
+
+[paper.gnn]
+# Overrides for GNNConfig.paper(); leave empty for the paper configuration.
