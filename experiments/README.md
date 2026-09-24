@@ -46,6 +46,12 @@ random-generator state are not restored; continuation is not bit-identical.
 Completed evaluation rows are skipped on resume, and an incomplete final JSON
 line is discarded. Use a new output directory when changing settings or code.
 
+BQSKit block synthesis now rejects results above its synthesis tolerance,
+including inaccurate results returned when QSearch or LEAP exhausts the
+three-layer search. Both RL rows treat these as pass failures. Restart RL
+training in a new output directory after updating from `93244f66`; its
+checkpoints may have learned from inequivalent circuits and must not be resumed.
+
 ## Frozen inputs and method differences
 
 - `assets/circuits.zip` preserves all 321 training and 41 evaluation QASM files

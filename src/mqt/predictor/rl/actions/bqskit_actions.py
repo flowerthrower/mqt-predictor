@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, TypeAlias, cast
 
 from bqskit import Circuit, MachineModel
 from bqskit.compiler import Compiler, Workflow
+from bqskit.compiler.basepass import BasePass
 from bqskit.compiler.compile import (
     build_multi_qudit_retarget_workflow,
     build_partitioning_workflow,
@@ -27,6 +28,7 @@ from bqskit.compiler.compile import (
 from bqskit.ext import qiskit_to_bqskit
 from bqskit.ext.qiskit.translate import OPENQASM2Language
 from bqskit.ir import gates
+from bqskit.ir.opt.cost.functions import HilbertSchmidtResidualsGenerator
 from bqskit.passes import (
     ApplyPlacement,
     BlockZXZPass,
@@ -61,7 +63,6 @@ from mqt.predictor.rl.actions.base import CompilationOrigin, DeferredDeviceActio
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from bqskit.compiler.basepass import BasePass
     from bqskit.compiler.passdata import PassData
     from bqskit.compiler.workflow import WorkflowLike
     from bqskit.ir import Gate
@@ -81,6 +82,17 @@ _BQSKIT_BLOCK_SIZE = 3
 _BQSKIT_SEARCH_MAX_LAYER = 3
 _BQSKIT_SEED = 10
 _BQSKIT_NUM_WORKERS = 1 if os.getenv("GITHUB_ACTIONS") == "true" else -1
+
+
+class _CheckSynthesisPass(BasePass):
+    """Reject inaccurate block synthesis, including exhausted bounded searches."""
+
+    async def run(self, circuit: Circuit, data: PassData) -> None:
+        """Check the same cost and tolerance used by QSearch and LEAP."""
+        cost = HilbertSchmidtResidualsGenerator().calc_cost(circuit, data.target)
+        if not cost <= _BQSKIT_SYNTHESIS_EPSILON:
+            msg = f"BQSKit synthesis cost {cost} exceeds tolerance {_BQSKIT_SYNTHESIS_EPSILON}."
+            raise ValueError(msg)
 
 
 class _QSDUnitarySynthesisPass(SynthesisPass):
@@ -235,7 +247,7 @@ def _bqskit_partitioned_synthesis_factory(
             ExtractMeasurements(),
             SetModelPass(model),
             build_partitioning_workflow(
-                synthesis_pass,
+                Workflow(synthesis_pass) + _CheckSynthesisPass(),
                 block_size=_BQSKIT_BLOCK_SIZE,
                 replace_filter_method="less-than-respecting-fully",
             ),

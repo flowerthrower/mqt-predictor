@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ctypes
 import gc
 import json
@@ -24,14 +25,17 @@ from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import pytest
+from bqskit.compiler.passdata import PassData
 from pytket.circuit import Node, Qubit
 from pytket.extensions.qiskit import qiskit_to_tk
 from pytket.passes import RenameQubitsPass
 from pytket.predicates import CompilationUnit
 from qiskit import QuantumCircuit, QuantumRegister
+from qiskit.quantum_info import Operator
 from qiskit.transpiler import Layout, PassManager, TransformationPass, TranspileLayout
 from stable_baselines3.common.vec_env import DummyVecEnv
 
+from mqt.predictor.rl.actions import bqskit_actions
 from mqt.predictor.rl.experiments.inputs import Inputs, load_target
 from mqt.predictor.rl.experiments.metrics import efficiency, observe
 from mqt.predictor.rl.experiments.worker import (
@@ -381,6 +385,49 @@ def test_concurrent_bqskit_workers(inputs: Inputs, config: dict[str, Any]) -> No
     finally:
         for env in environments:
             env.close()
+
+
+def test_synthesis_accuracy_check() -> None:
+    """Accept an equivalent block and reject a shorter, inequivalent block."""
+    circuit = QuantumCircuit(3)
+    circuit.ccx(0, 1, 2)
+    block = bqskit_actions.qiskit_to_bqskit(circuit)
+    data = PassData(block)
+    check = bqskit_actions._CheckSynthesisPass()  # ruff: ignore[private-member-access]
+    asyncio.run(check.run(block, data))
+    wrong = bqskit_actions.qiskit_to_bqskit(QuantumCircuit(3))
+    with pytest.raises(ValueError, match=r"BQSKit synthesis cost .* exceeds tolerance"):
+        asyncio.run(check.run(wrong, data))
+
+
+@pytest.mark.parametrize("mode", ["original", "paper"])
+@pytest.mark.parametrize("action_name", ["QSearchSynthesisPass", "LEAPSynthesisPass"])
+def test_inaccurate_synthesis_fails_and_recovers(
+    mode: str, action_name: str, inputs: Inputs, config: dict[str, Any]
+) -> None:
+    """An exhausted search cannot replace Toffoli with an inequivalent circuit."""
+    env = scasia.make_env(mode, config, inputs)
+    circuit = QuantumCircuit(3)
+    circuit.ccx(0, 1, 2)
+    try:
+        env.reset(circuit, seed=0)
+        action = next(index for index, action in env.action_set.items() if action.name == action_name)
+        _, reward, terminated, truncated, info = env.step(action)
+        assert (reward, terminated, truncated) == (0.0 if mode == "original" else -0.001, True, False)
+        assert info["termination_reason"] == "pass_error"
+        assert env.last_result["status"] == "error"
+        assert env.last_result["offending_pass"] == action_name
+        assert env.state == circuit
+
+        circuit = QuantumCircuit(2)
+        circuit.h(0)
+        env.reset(circuit, seed=0)
+        compiled = env.apply_action(action)
+        assert env.last_result["status"] == "ok"
+        assert env.is_circuit_synthesized(compiled)
+        assert Operator(compiled).equiv(Operator(circuit))
+    finally:
+        env.close()
 
 
 @pytest.mark.model_training
