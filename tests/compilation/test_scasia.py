@@ -15,6 +15,7 @@ import ctypes
 import gc
 import json
 import os
+import runpy
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -74,6 +75,87 @@ def config(tmp_path: Path) -> dict[str, Any]:
     config = scasia.resolve_config(ROOT / "experiments/scasia.toml")
     config["output"] = str(tmp_path)
     return config
+
+
+@pytest.fixture
+def comparison_results(tmp_path: Path) -> Path:
+    """Two circuits with unequal matched coverage, a timeout and a missing row."""
+    for compiler in ("qiskit", "tket", "original", "paper"):
+        output = tmp_path / compiler
+        output.mkdir()
+        identity = {
+            "compiler": compiler,
+            "inputs": {"circuits": {"test/a.qasm": "a", "test/b.qasm": "b"}},
+            "target": "boston",
+            "lock_sha256": "lock",
+            "source_sha256": "source",
+            "dependencies": {},
+            "python": "3.12",
+            "actions": ["same actions"],
+            "commit": "test-commit",
+            "settings": {"experiment": {"evaluation_circuits": 0, "evaluation_repetitions": 2}},
+        }
+        (output / "manifest.json").write_text(json.dumps({"identity": identity, "actual_training_timesteps": 0}))
+        records = []
+        for index, esp in enumerate((0.2, 0.4, 0.8, 0.99)):
+            if compiler == "original" and index == 3:
+                continue
+            records.append({
+                "compiler": compiler,
+                "circuit": "test/a.qasm" if index < 2 else "test/b.qasm",
+                "repetition": index % 2,
+                "seed": index,
+                "status": "timeout" if compiler == "tket" and index == 3 else "ok",
+                "final_esp": esp + 0.01 if compiler == "paper" else esp,
+                "runtime_seconds": 100 if index == 3 else 2,
+            })
+        (output / "evaluation.jsonl").write_text("".join(json.dumps(row) + "\n" for row in records))
+    return tmp_path
+
+
+def test_comparison_pairs_repetitions_and_counts_failures(comparison_results: Path) -> None:
+    """Give circuits equal weight and exclude failed or missing pairs in every row."""
+    compare = runpy.run_path(str(ROOT / "experiments/compare.py"))["compare"]
+    report = compare(comparison_results)
+    rows = {row["compiler"]: row for row in report["summary"]}
+    assert report["matched"] == 3
+    assert [row["matched_repetitions"] for row in report["paired"]] == [2, 1]
+    assert rows["qiskit"]["paired_mean_esp"] == pytest.approx(0.55)
+    assert rows["paper"]["paired_mean_esp"] == pytest.approx(0.56)
+    assert rows["tket"]["timeout"] == 1
+    assert rows["original"]["missing"] == 1
+    assert rows["original"]["completed"] == 3
+    assert report["runtimes"]["tket"] == [2, 2, 2, 100]
+
+
+def test_comparison_rejects_incompatible_inputs_and_duplicates(comparison_results: Path) -> None:
+    """Refuse a different calibration or duplicate observations instead of pooling them."""
+    compare = runpy.run_path(str(ROOT / "experiments/compare.py"))["compare"]
+    path = comparison_results / "paper/manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["identity"]["target"] = "different calibration"
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="incompatible target"):
+        compare(comparison_results)
+    manifest["identity"]["target"] = "boston"
+    path.write_text(json.dumps(manifest))
+    path = comparison_results / "paper/evaluation.jsonl"
+    text = path.read_text()
+    path.write_text(text + text.splitlines()[0] + "\n")
+    with pytest.raises(ValueError, match="duplicate repetition"):
+        compare(comparison_results)
+
+
+def test_comparison_without_valid_results(comparison_results: Path) -> None:
+    """An all-failed evaluation has no quality estimate, rather than a zero ESP."""
+    for path in comparison_results.glob("*/evaluation.jsonl"):
+        rows = [dict(json.loads(line), status="error", final_esp=None) for line in path.read_text().splitlines()]
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    compare = runpy.run_path(str(ROOT / "experiments/compare.py"))["compare"]
+    report = compare(comparison_results)
+    assert report["matched"] == 0
+    assert report["paired"] == []
+    assert all(row["paired_mean_esp"] is None and row["error"] == row["completed"] for row in report["summary"])
 
 
 def test_frozen_inputs(inputs: Inputs, config: dict[str, Any]) -> None:

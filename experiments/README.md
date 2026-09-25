@@ -52,6 +52,34 @@ three-layer search. Both RL rows treat these as pass failures. Restart RL
 training in a new output directory after updating from `93244f66`; its
 checkpoints may have learned from inequivalent circuits and must not be resumed.
 
+## Comparison plots
+
+After evaluation, point the report script at the parent of the four output
+folders:
+
+```sh
+uv run experiments/compare.py /path/to/scasia-runs
+```
+
+Open `scasia-runs/comparison/comparison.html` in a browser. It is a standalone,
+offline report with completion/failure rates, ESP distributions, runtime
+distributions and per-circuit paper-minus-original ESP differences. SVG/PNG
+plots and the plotted summary/per-circuit CSV values are saved beside it. Use
+`--output /path/to/report` to choose another report directory.
+
+Quality comparisons use repetitions valid in **all four** rows, then average
+within each circuit and give circuits equal weight. Failed and missing runs stay
+visible in the coverage counts; they are never assigned zero ESP. Runtime
+includes all completed attempts, including failures, startup and scoring.
+Incompatible inputs, targets, lockfiles or settings are rejected;
+code/dependency differences are flagged. Training steps and run commits are
+shown for provenance.
+
+The script declares Matplotlib as its only plotting dependency; `uv` runs it in
+an isolated script environment. It does not load models, change training outputs
+or modify the project's dependency lock. TensorBoard training curves remain
+available in each RL row's `logs/` directory.
+
 ## Frozen inputs and method differences
 
 - `assets/circuits.zip` preserves all 321 training and 41 evaluation QASM files
