@@ -212,6 +212,31 @@ def test_comparison_before_evaluation(comparison_results: Path) -> None:
     assert sum("excluded" in message for message in report["warnings"]) == 4
 
 
+@pytest.mark.parametrize("compilers", [("qiskit", "paper"), ("qiskit",)])
+def test_comparison_groups_algorithm_circuit_means(compilers: tuple[str, ...]) -> None:
+    """Keep underscores in algorithm names and weight circuits equally across run counts."""
+    grouped_esp = runpy.run_path(str(ROOT / "experiments/compare.py"))["grouped_esp"]
+    report = {
+        "summary": [{"compiler": name} for name in compilers],
+        "paired": [
+            {"circuit": "test/vqe_real_amp_10_indep.qasm", "matched_repetitions": 10, "qiskit": 0.2, "paper": 0.4},
+            {"circuit": "test/vqe_real_amp_20_indep.qasm", "matched_repetitions": 1, "qiskit": 0.8, "paper": 0.8},
+            {"circuit": "test/qft_5_indep.qasm", "matched_repetitions": 10, "qiskit": 0.9, "paper": 0.1},
+        ],
+    }
+    groups = grouped_esp(report)
+    assert [row["algorithm"] for row in groups] == (
+        ["qft", "vqe_real_amp"] if "paper" in compilers else ["vqe_real_amp", "qft"]
+    )
+    vqe = next(row for row in groups if row["algorithm"] == "vqe_real_amp")
+    assert vqe["qiskit"] == pytest.approx(0.5)
+    if "paper" in compilers:
+        assert vqe["paper"] == pytest.approx(0.6)
+    else:
+        assert "paper" not in vqe
+    assert grouped_esp({**report, "paired": []}) == []
+
+
 def test_frozen_inputs(inputs: Inputs, config: dict[str, Any]) -> None:
     """Check hashes, split, calibration date and identical physical targets."""
     assert len(inputs.names("train")) == 321

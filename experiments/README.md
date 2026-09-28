@@ -62,10 +62,11 @@ uv run experiments/compare.py /path/to/scasia-runs
 ```
 
 Open `scasia-runs/comparison/comparison.html` in a browser. It is a standalone,
-offline report with completion/failure rates, ESP distributions, runtime
-distributions and per-circuit paper-minus-original ESP differences. SVG/PNG
-plots and the plotted summary/per-circuit CSV values are saved beside it. Use
-`--output /path/to/report` to choose another report directory.
+offline report with the paper's grouped ESP plot, completion/failure rates, ESP
+distributions, runtime distributions and per-circuit paper-minus-original ESP
+differences. SVG/PNG plots and the plotted summary/per-circuit CSV values are
+saved beside it. Use `--output /path/to/report` to choose another report
+directory.
 
 Rows without a manifest or completed evaluation records are excluded and listed
 in the report. An unfinished final JSON line is ignored without changing the
@@ -84,6 +85,36 @@ The script declares Matplotlib as its only plotting dependency; `uv` runs it in
 an isolated script environment. It does not load models, change training outputs
 or modify the project's dependency lock. TensorBoard training curves remain
 available in each RL row's `logs/` directory.
+
+### Jupyter notebook
+
+Open `experiments/compare.ipynb`, set `RESULTS`, and run all cells. Rerun the
+last cell to refresh during evaluation. The notebook uses `compare.py` and
+displays the same report inline. Keep the two files together.
+
+Start Jupyter with Matplotlib in an isolated reporting environment:
+
+```sh
+cd experiments
+uvx --from jupyterlab --with 'matplotlib>=3.10,<4' jupyter lab compare.ipynb
+```
+
+Use the default Python 3 kernel. This follows uv's
+[standalone Jupyter setup](https://docs.astral.sh/uv/guides/integration/jupyter/#using-jupyter-as-a-standalone-tool)
+and leaves the training environment and lockfile unchanged. Over SSH, add
+`--no-browser` to the Jupyter command and forward its port from your computer,
+for example `ssh -L 8888:localhost:8888 hopf@cda-server-4`. Open the
+token-bearing localhost URL printed by Jupyter. While training is running, copy
+only `compare.py` and `compare.ipynb` from the updated branch into a separate
+directory; start Jupyter there to preserve the run's Git revision.
+
+The `reward_comp_esp_grouped.svg` and `.png` plots reproduce the manuscript's
+ESP figure layout using the rerun results. Algorithm names come from the frozen
+`<algorithm>_<qubits>_indep.qasm` filenames. Each point averages matched circuit
+means within an algorithm; the displayed overall means give each circuit equal
+weight. Algorithm order follows the paper row, or the mean across included rows
+when paper is unavailable. Missing algorithms are omitted. The report does not
+reuse historical paper values or claim identical results.
 
 ## Frozen inputs and method differences
 

@@ -20,7 +20,7 @@ import csv
 import html
 import json
 import math
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 from statistics import mean, median
 from typing import Any
@@ -133,6 +133,25 @@ def compare(results: Path) -> dict[str, Any]:
     return {"summary": summary, "paired": paired, "runtimes": runtimes, "warnings": warnings, "matched": len(common)}
 
 
+def grouped_esp(report: dict[str, Any]) -> list[dict[str, Any]]:
+    """Average matched circuit means within each frozen benchmark algorithm."""
+    compilers = [row["compiler"] for row in report["summary"]]
+    algorithms = defaultdict(list)
+    for row in report["paired"]:
+        algorithm = Path(row["circuit"]).stem.rsplit("_", 2)[0]
+        algorithms[algorithm].append(row)
+    grouped = [
+        {
+            "algorithm": algorithm,
+            **{name: mean(row[name] for row in rows) for name in compilers},
+        }
+        for algorithm, rows in algorithms.items()
+    ]
+    return sorted(
+        grouped, key=lambda row: row["paper"] if "paper" in compilers else mean(row[name] for name in compilers)
+    )
+
+
 def write_report(report: dict[str, Any], output: Path) -> None:
     """Save an offline HTML view, SVG/PNG plots and the plotted CSV values."""
     # Keep aggregation usable without the plotting dependency supplied by uv.
@@ -150,6 +169,55 @@ def write_report(report: dict[str, Any], output: Path) -> None:
             writer.writeheader()
             writer.writerows(rows)
     figures = []
+    grouped = grouped_esp(report)
+    if grouped:
+        with plt.rc_context({"font.family": "serif"}):
+            fig, axis = plt.subplots(figsize=(15, 7), layout="constrained")
+            styles = {
+                "qiskit": ("Qiskit", "red", "o"),
+                "tket": ("TKET", "green", "s"),
+                "original": ("MQT Predictor", "#703b9c", "D"),
+                "paper": ("Proposed Method", "blue", "^"),
+            }
+            for index, row in enumerate(grouped):
+                axis.axvspan(index - 0.5, index + 0.5, color="0.90" if index % 2 else "0.95", zorder=0)
+                values = [row[name] for name in compilers]
+                axis.vlines(index, min(values), max(values), color="0.75", linewidth=1, zorder=1)
+            for name in compilers:
+                label, color, marker = styles[name]
+                axis.scatter(
+                    range(len(grouped)),
+                    [row[name] for row in grouped],
+                    label=label,
+                    color=color,
+                    marker=marker,
+                    s=65,
+                    zorder=2,
+                )
+            axis.set_xticks(range(len(grouped)), [row["algorithm"] for row in grouped], rotation=45, ha="right")
+            axis.tick_params(axis="x", labelsize=9)
+            axis.set(
+                xlabel="Benchmarks (MQT Bench)",
+                ylabel="Estimated Success Probability",
+                xlim=(-0.6, len(grouped) - 0.4),
+                ylim=(-0.05, 1.05),
+            )
+            axis.grid(axis="y", linestyle="--", color="0.75", linewidth=0.6)
+            axis.legend(loc="upper left")
+            means = "Means (per circuit)\n" + "\n".join(
+                f"{styles[row['compiler']][0]:<16}: {row['paired_mean_esp']:.3f}" for row in summary
+            )
+            axis.text(
+                0.99,
+                0.02,
+                means,
+                transform=axis.transAxes,
+                ha="right",
+                va="bottom",
+                fontfamily="monospace",
+                bbox={"facecolor": "white", "alpha": 0.8, "edgecolor": "none"},
+            )
+            figures.append(("reward_comp_esp_grouped", fig))
     fig, axes = plt.subplots(1, 3, figsize=(14, 4.5), layout="constrained")
     bottom = [0.0] * len(compilers)
     for status, color in (
@@ -234,6 +302,9 @@ th,td{{padding:10px;border-bottom:1px solid #ddd;text-align:right}}th:first-chil
 <p>Quality uses {report["matched"]} repetitions valid in all included rows, covering {len(paired)} circuits.
 Each circuit contributes one mean, with the same repetitions for every compiler; no best-of-N selection.
 Failures and missing runs are shown separately, never converted to zero ESP.</p>
+<p>The paper-style ESP plot averages circuit means within each algorithm. Its overall means give every circuit equal
+weight. Algorithms are sorted by the paper row, or by the mean across included rows when paper is unavailable.
+This recreates the figure layout with rerun data, not the manuscript's historical values.</p>
 <p>Runtime includes all completed attempts, including failures, worker startup and scoring.
 Partial results are visible in the completed/expected counts. These plots are descriptive, without significance claims.</p>
 <div class="scroll"><table><thead><tr>{header}</tr></thead><tbody>{rows}</tbody></table></div>
