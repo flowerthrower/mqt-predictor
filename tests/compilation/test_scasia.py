@@ -158,6 +158,60 @@ def test_comparison_without_valid_results(comparison_results: Path) -> None:
     assert all(row["paired_mean_esp"] is None and row["error"] == row["completed"] for row in report["summary"])
 
 
+@pytest.mark.parametrize(
+    ("compiler", "filename"),
+    [("qiskit", "manifest.json"), ("paper", "manifest.json"), ("original", "evaluation.jsonl"), ("tket", "empty")],
+)
+def test_comparison_excludes_unavailable_runs(comparison_results: Path, compiler: str, filename: str) -> None:
+    """Compare available rows even when another row has not started evaluation."""
+    if filename == "empty":
+        (comparison_results / compiler / "evaluation.jsonl").write_text("")
+    else:
+        (comparison_results / compiler / filename).unlink()
+    compare = runpy.run_path(str(ROOT / "experiments/compare.py"))["compare"]
+    report = compare(comparison_results)
+    included = {"qiskit", "tket", "original", "paper"} - {compiler}
+    assert {row["compiler"] for row in report["summary"]} == included
+    assert set(report["runtimes"]) == included
+    assert report["matched"] == 3
+    assert all(
+        row["paired_mean_esp"] == pytest.approx(0.56 if row["compiler"] == "paper" else 0.55)
+        for row in report["summary"]
+    )
+    assert any(message.startswith(f"{compiler}: excluded") for message in report["warnings"])
+
+
+def test_comparison_reads_only_complete_records(comparison_results: Path) -> None:
+    """A live writer's unfinished final record is excluded without modifying it."""
+    path = comparison_results / "paper/evaluation.jsonl"
+    lines = path.read_text().splitlines(keepends=True)
+    partial = "".join(lines[:-1]) + lines[-1][:20]
+    path.write_text(partial)
+    compare = runpy.run_path(str(ROOT / "experiments/compare.py"))["compare"]
+    report = compare(comparison_results)
+    paper = next(row for row in report["summary"] if row["compiler"] == "paper")
+    assert paper["completed"] == 3
+    assert paper["missing"] == 1
+    assert report["matched"] == 3
+    assert any("paper: ignored unfinished" in message for message in report["warnings"])
+    assert path.read_text() == partial
+    path.write_text("".join(lines) + "{invalid}\n")
+    with pytest.raises(json.JSONDecodeError):
+        compare(comparison_results)
+
+
+def test_comparison_before_evaluation(comparison_results: Path) -> None:
+    """There is no comparison yet when all rows are still waiting for evaluation."""
+    for path in comparison_results.glob("*/evaluation.jsonl"):
+        path.write_text('{"compiler":')
+    compare = runpy.run_path(str(ROOT / "experiments/compare.py"))["compare"]
+    report = compare(comparison_results)
+    assert report["summary"] == []
+    assert report["paired"] == []
+    assert report["matched"] == 0
+    assert sum("excluded" in message for message in report["warnings"]) == 4
+
+
 def test_frozen_inputs(inputs: Inputs, config: dict[str, Any]) -> None:
     """Check hashes, split, calibration date and identical physical targets."""
     assert len(inputs.names("train")) == 321

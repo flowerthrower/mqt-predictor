@@ -54,8 +54,8 @@ checkpoints may have learned from inequivalent circuits and must not be resumed.
 
 ## Comparison plots
 
-After evaluation, point the report script at the parent of the four output
-folders:
+During or after evaluation, point the report script at the parent of the
+compiler output folders:
 
 ```sh
 uv run experiments/compare.py /path/to/scasia-runs
@@ -67,7 +67,12 @@ distributions and per-circuit paper-minus-original ESP differences. SVG/PNG
 plots and the plotted summary/per-circuit CSV values are saved beside it. Use
 `--output /path/to/report` to choose another report directory.
 
-Quality comparisons use repetitions valid in **all four** rows, then average
+Rows without a manifest or completed evaluation records are excluded and listed
+in the report. An unfinished final JSON line is ignored without changing the
+results. If no rows are available yet, the command prints a message and exits.
+The paper-minus-original plot requires both RL rows.
+
+Quality comparisons use repetitions valid in **all included** rows, then average
 within each circuit and give circuits equal weight. Failed and missing runs stay
 visible in the coverage counts; they are never assigned zero ESP. Runtime
 includes all completed attempts, including failures, startup and scoring.

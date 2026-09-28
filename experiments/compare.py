@@ -11,7 +11,7 @@
 # dependencies = ["matplotlib>=3.10,<4"]
 # ///
 
-"""Compare the four SCASIA output folders without loading models or compilers."""
+"""Compare available SCASIA evaluations without loading models or compilers."""
 
 from __future__ import annotations
 
@@ -30,10 +30,37 @@ COLORS = ("#527b9f", "#b4773c", "#79836a", "#795aaa")
 
 
 def compare(results: Path) -> dict[str, Any]:
-    """Match valid repetitions across all rows and retain every failure count."""
-    manifests = {name: json.loads((results / name / "manifest.json").read_text()) for name in COMPILERS}
-    reference = manifests["qiskit"]["identity"]
+    """Match valid repetitions across available rows and retain every failure count."""
+    manifests = {}
+    runs = {}
     warnings = []
+    for name in COMPILERS:
+        manifest_path = results / name / "manifest.json"
+        evaluation_path = results / name / "evaluation.jsonl"
+        if not manifest_path.is_file() or not evaluation_path.is_file():
+            warnings.append(f"{name}: excluded; manifest or evaluation file is missing.")
+            continue
+        records = {}
+        with evaluation_path.open() as stream:
+            for line in stream:
+                if not line.endswith("\n"):
+                    warnings.append(f"{name}: ignored unfinished final evaluation record.")
+                    break
+                row = json.loads(line)
+                key = (row["circuit"], row["repetition"])
+                if row["compiler"] != name or key in records:
+                    msg = f"{name}: wrong compiler or duplicate repetition {key}."
+                    raise ValueError(msg)
+                records[key] = row
+        if not records:
+            warnings.append(f"{name}: excluded; no completed evaluation records yet.")
+            continue
+        runs[name] = records
+        manifests[name] = json.loads(manifest_path.read_text())
+    if not runs:
+        return {"summary": [], "paired": [], "runtimes": {}, "warnings": warnings, "matched": 0}
+    reference_name = next(iter(manifests))
+    reference = manifests[reference_name]["identity"]
     for name, manifest in manifests.items():
         identity = manifest["identity"]
         if identity["compiler"] != name:
@@ -44,11 +71,13 @@ def compare(results: Path) -> dict[str, Any]:
                 msg = f"{name}: incompatible {field}; use runs from the same experiment configuration."
                 raise ValueError(msg)
         warnings.extend(
-            f"{name}: {field} differs from qiskit; check provenance before interpreting differences."
+            f"{name}: {field} differs from {reference_name}; check provenance before interpreting differences."
             for field in ("source_sha256", "dependencies", "python")
             if identity[field] != reference[field]
         )
-    if manifests["original"]["identity"]["actions"] != manifests["paper"]["identity"]["actions"]:
+    if {"original", "paper"} <= manifests.keys() and (
+        manifests["original"]["identity"]["actions"] != manifests["paper"]["identity"]["actions"]
+    ):
         msg = "The two RL rows have different action registries."
         raise ValueError(msg)
     settings = reference["settings"]["experiment"]
@@ -56,19 +85,12 @@ def compare(results: Path) -> dict[str, Any]:
     if settings["evaluation_circuits"]:
         circuits = circuits[: settings["evaluation_circuits"]]
     expected = {(name, repetition) for name in circuits for repetition in range(settings["evaluation_repetitions"])}
-    runs = {}
     valid = {}
-    for name in COMPILERS:
-        records = {}
-        with (results / name / "evaluation.jsonl").open() as stream:
-            for line in stream:
-                row = json.loads(line)
-                key = (row["circuit"], row["repetition"])
-                if row["compiler"] != name or key not in expected or key in records:
-                    msg = f"{name}: wrong compiler, unexpected or duplicate repetition {key}."
-                    raise ValueError(msg)
-                records[key] = row
-        runs[name] = records
+    for name, records in runs.items():
+        for key in records:
+            if key not in expected:
+                msg = f"{name}: unexpected repetition {key}."
+                raise ValueError(msg)
         valid[name] = {
             key
             for key, row in records.items()
@@ -76,14 +98,14 @@ def compare(results: Path) -> dict[str, Any]:
         }
     common = set.intersection(*valid.values())
     for key in set.intersection(*(set(records) for records in runs.values())):
-        if len({runs[name][key]["seed"] for name in COMPILERS}) != 1:
+        if len({records[key]["seed"] for records in runs.values()}) != 1:
             msg = f"Evaluation seeds differ for {key}."
             raise ValueError(msg)
     paired = [
         {
             "circuit": circuit,
             "matched_repetitions": len(keys),
-            **{name: mean(runs[name][key]["final_esp"] for key in keys) for name in COMPILERS},
+            **{name: mean(records[key]["final_esp"] for key in keys) for name, records in runs.items()},
         }
         for circuit in circuits
         if (keys := sorted(key for key in common if key[0] == circuit))
@@ -120,15 +142,16 @@ def write_report(report: dict[str, Any], output: Path) -> None:
     plt.rcParams.update({"font.size": 10, "axes.spines.top": False, "axes.spines.right": False})
     output.mkdir(parents=True, exist_ok=True)
     summary, paired = report["summary"], report["paired"]
+    compilers = [row["compiler"] for row in summary]
     for filename, rows in (("summary.csv", summary), ("per_circuit.csv", paired)):
         with (output / filename).open("w", newline="") as stream:
-            fields = list(rows[0]) if rows else ["circuit", "matched_repetitions", *COMPILERS]
+            fields = list(rows[0]) if rows else ["circuit", "matched_repetitions", *compilers]
             writer = csv.DictWriter(stream, fieldnames=fields)
             writer.writeheader()
             writer.writerows(rows)
     figures = []
     fig, axes = plt.subplots(1, 3, figsize=(14, 4.5), layout="constrained")
-    bottom = [0.0] * len(COMPILERS)
+    bottom = [0.0] * len(compilers)
     for status, color in (
         ("valid", "#527b9f"),
         ("error", "#c05c51"),
@@ -138,11 +161,12 @@ def write_report(report: dict[str, Any], output: Path) -> None:
         ("missing", "#dddddd"),
     ):
         heights = [100 * row[status] / row["expected"] if row["expected"] else 0 for row in summary]
-        axes[0].bar(COMPILERS, heights, bottom=bottom, label=status, color=color)
+        axes[0].bar(compilers, heights, bottom=bottom, label=status, color=color)
         bottom = [a + b for a, b in zip(bottom, heights, strict=True)]
     axes[0].set(title="Completion and failures", ylabel="% of expected repetitions", ylim=(0, 105))
     axes[0].legend(loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=3, fontsize=8)
-    for index, (name, color) in enumerate(zip(COMPILERS, COLORS, strict=True), start=1):
+    for index, name in enumerate(compilers, start=1):
+        color = COLORS[COMPILERS.index(name)]
         if paired:
             values = [row[name] for row in paired]
             axes[1].boxplot(values, positions=[index], widths=0.45, showfliers=False)
@@ -153,13 +177,13 @@ def write_report(report: dict[str, Any], output: Path) -> None:
     axes[1].set(title="ESP · matched valid repetitions", ylabel="Mean ESP per circuit", ylim=(0, 1.03))
     axes[2].set(title="Runtime · all completed attempts", ylabel="Wall time (seconds, log scale)", yscale="log")
     for axis in axes[1:]:
-        axis.set_xticks(range(1, 5), COMPILERS)
-        axis.set_xlim(0.5, 4.5)
+        axis.set_xticks(range(1, len(compilers) + 1), compilers)
+        axis.set_xlim(0.5, len(compilers) + 0.5)
         axis.grid(axis="y", alpha=0.15)
     if not paired:
         axes[1].text(0.5, 0.5, "No common valid repetitions", ha="center", transform=axes[1].transAxes)
     figures.append(("overview", fig))
-    if paired:
+    if paired and {"original", "paper"} <= set(compilers):
         ordered = sorted(paired, key=lambda row: row["paper"] - row["original"])
         fig, axis = plt.subplots(figsize=(10, max(3, 0.25 * len(ordered) + 1.4)), layout="constrained")
         deltas = [row["paper"] - row["original"] for row in ordered]
@@ -206,7 +230,8 @@ svg{{width:100%;height:auto;background:white;margin:16px 0}} table{{border-colla
 th,td{{padding:10px;border-bottom:1px solid #ddd;text-align:right}}th:first-child,td:first-child{{text-align:left}}
 .scroll{{overflow:auto}}.warning{{background:#fff0d9;padding:12px}}.muted{{color:#606870;overflow-wrap:anywhere}}</style>
 <h1>SCASIA comparison</h1>{warnings}
-<p>Quality uses {report["matched"]} repetitions valid in all four rows, covering {len(paired)} circuits.
+<p>Included rows: {", ".join(compilers)}.</p>
+<p>Quality uses {report["matched"]} repetitions valid in all included rows, covering {len(paired)} circuits.
 Each circuit contributes one mean, with the same repetitions for every compiler; no best-of-N selection.
 Failures and missing runs are shown separately, never converted to zero ESP.</p>
 <p>Runtime includes all completed attempts, including failures, worker startup and scoring.
@@ -218,13 +243,19 @@ Partial results are visible in the completed/expected counts. These plots are de
 
 
 def main() -> None:
-    """Read the parent of the four compiler output directories."""
+    """Read available evaluations from the compiler output directories."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("results", type=Path, help="Directory containing qiskit/, tket/, original/ and paper/.")
     parser.add_argument("--output", type=Path, help="Report directory; defaults to RESULTS/comparison/.")
     args = parser.parse_args()
     output = args.output or args.results / "comparison"
-    write_report(compare(args.results), output)
+    report = compare(args.results)
+    for message in report["warnings"]:
+        print(message)
+    if not report["summary"]:
+        print("No completed evaluation records yet; no report written.")
+        return
+    write_report(report, output)
     print(output / "comparison.html")
 
 
