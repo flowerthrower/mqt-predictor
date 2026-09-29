@@ -27,7 +27,23 @@ Defaults are ESP, 100,000 requested training steps, 32 actions per episode, seed
 stochastically with a recorded seed for each repetition. Every repetition is
 retained; there is no best-of-N policy selection. The native TKET pipeline
 retains its fixed LightSABRE seed 0; shared BQSKit actions retain seed 10.
-Qiskit uses the repetition seed. Native SDK search trials are unchanged.
+Qiskit uses the repetition seed. The Qiskit baseline retains its native trial
+budget; RL SABRE actions use one seeded layout trial and one swap trial.
+
+Both RL rows exclude `QiskitO3`. They expose
+`Optimize1qGatesDecomposition_preserve` and `Opt2qBlocks_preserve` as separate
+actions for optimization in Boston's native basis. AI routing and MGD remain
+excluded. This changes the action schema: train fresh models in a new output
+directory; existing checkpoints cannot be resumed with this action set. The
+paper graph input also keeps normalized qubit count and depth instead of
+overwriting them with raw values. This input change requires fresh training too.
+
+The RL `VF2PostLayout` action tries one deterministic layout with an idle-time
+decay estimate included in its placement cost. It accepts the proposal only if
+ESP improves on the unchanged physical target. This is one VF2 invocation, with
+seed -1; it does not sample multiple compiled candidates. The worker still
+enforces the action's timeout. The native Qiskit and TKET baseline pipelines are
+unchanged.
 
 `original.ppo` lists the legacy PPO settings, including gamma 0.98 and
 2,048-step rollouts. `paper.gnn` overrides `GNNConfig.paper()`; an empty table

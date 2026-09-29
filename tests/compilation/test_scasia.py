@@ -32,10 +32,13 @@ from pytket.extensions.qiskit import qiskit_to_tk
 from pytket.passes import RenameQubitsPass
 from pytket.predicates import CompilationUnit
 from qiskit import QuantumCircuit, QuantumRegister
+from qiskit.converters import circuit_to_dag
 from qiskit.quantum_info import Operator
 from qiskit.transpiler import Layout, PassManager, TransformationPass, TranspileLayout
+from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 from stable_baselines3.common.vec_env import DummyVecEnv
 
+from mqt.predictor.reward import estimated_success_probability
 from mqt.predictor.rl.actions import bqskit_actions
 from mqt.predictor.rl.experiments.inputs import Inputs, load_target
 from mqt.predictor.rl.experiments.metrics import efficiency, observe
@@ -262,6 +265,10 @@ def test_distinct_methods_shared_actions(inputs: Inputs, config: dict[str, Any])
     old = scasia.make_env("original", config, inputs)
     paper = scasia.make_env("paper", config, inputs)
     assert [action.name for action in old.action_set.values()] == [action.name for action in paper.action_set.values()]
+    names = {action.name for action in paper.action_set.values()}
+    assert names.isdisjoint({"QiskitO3", "MGDPass", "AIRouting", "AIRouting_opt"})
+    assert {"Optimize1qGatesDecomposition_preserve", "Opt2qBlocks_preserve"}.issubset(names)
+    assert cast("Discrete", paper.action_space).n == len(paper.action_set)
     circuit = QuantumCircuit(2)
     circuit.h(0)
     old_obs, _ = old.reset(circuit, seed=0)
@@ -293,6 +300,97 @@ def ready_env(mode: str, inputs: Inputs, config: dict[str, Any]) -> ExperimentEn
     )
     env.valid_actions = env.determine_valid_actions_for_state()
     return env
+
+
+def test_paper_graph_preserves_normalized_sizes(inputs: Inputs, config: dict[str, Any]) -> None:
+    """Raw physical width and depth must not overwrite the normalized GNN input."""
+    env = scasia.make_env("paper", config, inputs)
+    wrapped = scasia.NormalizedGNNObservationWrapper(env)
+    circuit = QuantumCircuit(156)
+    for _ in range(100):
+        circuit.sx(0)
+    observation, _ = wrapped.reset(circuit, seed=0)
+    assert wrapped.graph_observation["global_features"][0, :2].tolist() == pytest.approx([
+        observation["num_qubits"].item(),
+        observation["depth"].item(),
+    ])
+    assert wrapped.graph_observation["global_features"][0, 1] < 1
+    assert wrapped.graph_observation.num_nodes == 100
+
+
+@pytest.mark.parametrize("mode", ["original", "paper"])
+@pytest.mark.parametrize("action_name", ["Optimize1qGatesDecomposition_preserve", "Opt2qBlocks_preserve"])
+def test_native_optimizations_preserve_compilation(
+    mode: str, action_name: str, inputs: Inputs, config: dict[str, Any]
+) -> None:
+    """Select canonical optimizations in a compiled state and execute the same action in the worker."""
+    env = ready_env(mode, inputs, config)
+    env.state.cz(0, 1)
+    env.state.sx(0)
+    env.state.sx(0)
+    original = env.state.copy()
+    action = next(index for index, candidate in env.action_set.items() if candidate.name == action_name)
+    assert env.action_masks()[action]
+    try:
+        _, _, terminated, truncated, _ = env.step(action)
+        assert env.last_result["status"] == "ok"
+        assert env.trace[0]["name"] == action_name
+        assert not terminated
+        assert not truncated
+        assert env.action_masks()[env.action_terminate_index]
+        assert env.is_circuit_synthesized(env.state)
+        assert env.state.size() < original.size()
+        assert Operator(env.state).equiv(Operator(original))
+        assert env.layout is not None
+        assert env.layout.final_index_layout() == [0, 1]
+        assert env.step(env.action_terminate_index)[2:4] == (True, False)
+        assert env.trace[-1]["name"] == "terminate"
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize(("name", "seed", "improves"), [("ghz_19", 0, True), ("qpeinexact_17", 32, False)])
+def test_layout_refinement_preserves_outputs_and_improves_esp(
+    name: str, seed: int, improves: bool, inputs: Inputs, config: dict[str, Any]
+) -> None:
+    """Accept an ESP improvement, reject a worse proposal, and retain physical/output mappings."""
+    env = scasia.make_env("paper", config, inputs)
+    original = inputs.circuit(f"train/{name}_indep.qasm")
+    circuit = generate_preset_pass_manager(3, target=env.device, seed_transpiler=seed).run(original)
+    before = estimated_success_probability(circuit, env.device)
+    env.reset(circuit, seed=seed)
+    env.layout = circuit.layout
+    env.num_qubits_uncompiled_circuit = original.num_qubits
+    env.valid_actions = env.determine_valid_actions_for_state()
+    action = next(index for index, action in env.action_set.items() if action.name == "VF2PostLayout")
+    assert env.action_masks()[action]
+    try:
+        env.step(action)
+        assert env.last_result["status"] == "ok"
+        after = estimated_success_probability(env.state, env.device)
+        assert (after > before) if improves else (after == before)
+        assert env.trace[-1]["after"]["esp"] == after
+        assert env.action_masks()[env.action_terminate_index]
+        assert circuit.layout is not None
+        assert env.layout is not None
+        permutation = dict(
+            zip(
+                circuit.layout.final_index_layout(filter_ancillas=False),
+                env.layout.final_index_layout(filter_ancillas=False),
+                strict=True,
+            )
+        )
+        equivalent = env.state.copy_empty_like()
+        equivalent.global_phase = circuit.global_phase
+        for instruction in circuit:
+            equivalent.append(
+                instruction.operation,
+                [env.state.qubits[permutation[circuit.find_bit(qubit).index]] for qubit in instruction.qubits],
+                [env.state.clbits[circuit.find_bit(bit).index] for bit in instruction.clbits],
+            )
+        assert circuit_to_dag(equivalent) == circuit_to_dag(env.state)
+    finally:
+        env.close()
 
 
 @pytest.mark.parametrize("mode", ["original", "paper"])

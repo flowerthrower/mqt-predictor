@@ -15,7 +15,9 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from gymnasium import Env
 from gymnasium.spaces import Box, Dict, Discrete
+from qiskit.transpiler.passes import Collect2qBlocks, ConsolidateBlocks, Optimize1qGatesDecomposition, UnitarySynthesis
 
+from mqt.predictor.rl.actions.base import CompilationOrigin, DeferredDeviceAction, PassType
 from mqt.predictor.rl.predictorenv import PredictorEnv
 from mqt.predictor.utils import calc_supermarq_features
 
@@ -29,6 +31,39 @@ if TYPE_CHECKING:
     from .worker import CompilerWorker
 
 LEGACY_FEATURES = ("program_communication", "critical_depth", "entanglement_ratio", "parallelism", "liveness")
+
+
+def configure_actions(env: PredictorEnv) -> None:
+    """Replace the O3 optimization loop with two separately selectable native actions."""
+    index = next(index for index, action in env.action_set.items() if action.name == "QiskitO3")
+    env.action_set[index] = DeferredDeviceAction(
+        "Optimize1qGatesDecomposition_preserve",
+        CompilationOrigin.QISKIT,
+        PassType.OPT,
+        lambda device: [Optimize1qGatesDecomposition(basis=device.operation_names)],
+        preserves_layout=True,
+        preserves_routing=True,
+        preserves_synthesis=True,
+    )
+    index = env.action_terminate_index
+    env.action_set[index + 1] = env.action_set[index]
+    env.action_set[index] = DeferredDeviceAction(
+        "Opt2qBlocks_preserve",
+        CompilationOrigin.QISKIT,
+        PassType.OPT,
+        lambda device: [
+            Collect2qBlocks(),
+            ConsolidateBlocks(basis_gates=device.operation_names),
+            UnitarySynthesis(basis_gates=device.operation_names, approximation_degree=1.0),
+        ],
+        preserves_layout=True,
+        preserves_routing=True,
+        preserves_synthesis=True,
+    )
+    env.actions_opt_indices.append(index)
+    env.actions_structure_preserving_indices.append(index)
+    env.action_terminate_index = index + 1
+    env.action_space = Discrete(len(env.action_set))
 
 
 class ExperimentEnv(PredictorEnv):
@@ -47,6 +82,7 @@ class ExperimentEnv(PredictorEnv):
             reward_scale=settings["reward_scale"],
             no_effect_penalty=settings["no_effect_penalty"],
         )
+        configure_actions(self)
         self.inputs = inputs
         self.worker = worker
         self.mode = mode

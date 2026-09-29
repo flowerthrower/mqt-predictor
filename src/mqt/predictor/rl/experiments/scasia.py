@@ -92,6 +92,17 @@ def make_env(compiler: str, config: dict[str, Any], inputs: Inputs) -> Experimen
     return cls(target, inputs, worker, config["experiment"], compiler)
 
 
+class NormalizedGNNObservationWrapper(GNNObservationWrapper):
+    """Keep the environment's normalized sizes in the experiment's graph input."""
+
+    def _update_graph_observation(self, observation: dict[str, Any]) -> None:
+        super()._update_graph_observation(observation)
+        self.graph_observation["global_features"][0, :2] = torch.as_tensor([
+            observation["num_qubits"].item(),
+            observation["depth"].item(),
+        ])
+
+
 def run_identity(config: dict[str, Any], inputs: Inputs, env: ExperimentEnv, compiler: str) -> dict[str, Any]:
     """Record code, lock, installed dependencies, actions and frozen input hashes."""
     root = Path(__file__).resolve().parents[5]
@@ -114,7 +125,12 @@ def run_identity(config: dict[str, Any], inputs: Inputs, env: ExperimentEnv, com
         ],
         "legacy_policy": {"net_arch": {"pi": [64, 64], "vf": [64, 64]}, "activation": "Tanh", "optimizer": "Adam"},
         "evaluation_sampling": "seeded stochastic; every repetition retained; no best-of-N",
-        "native_sdk_seeds": {"qiskit": "per-compilation seed", "tket_lightsabre": 0, "bqskit_actions": 10},
+        "native_sdk_seeds": {
+            "qiskit": "per-compilation seed",
+            "rl_vf2_postlayout": -1,
+            "tket_lightsabre": 0,
+            "bqskit_actions": 10,
+        },
     }
 
 
@@ -162,7 +178,7 @@ def train(
 ) -> None:
     """Train to the requested total budget, completing whole SB3 rollouts."""
     settings = config["experiment"]
-    wrapped = GNNObservationWrapper(env) if compiler == "paper" else env
+    wrapped = NormalizedGNNObservationWrapper(env) if compiler == "paper" else env
     model_class = GNNMaskablePPO if compiler == "paper" else MaskablePPO
     identity = digest(json.dumps(manifest["identity"], sort_keys=True).encode())
     if resume:
@@ -217,7 +233,7 @@ def evaluate(
     """Retain every independent compilation, including failed repetitions."""
     settings = config["experiment"]
     model = None
-    wrapped = GNNObservationWrapper(env) if compiler == "paper" else env
+    wrapped = NormalizedGNNObservationWrapper(env) if compiler == "paper" else env
     if compiler in {"original", "paper"}:
         cls = GNNMaskablePPO if compiler == "paper" else MaskablePPO
         model = cls.load(output / "final.zip")
