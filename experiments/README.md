@@ -168,9 +168,21 @@ available in each RL row's `logs/` directory.
 
 ### Jupyter notebook
 
-Open `experiments/compare.ipynb`, set `RESULTS`, and run all cells. Rerun the
-last cell to refresh during evaluation. The notebook uses `compare.py` and
-displays the same report inline. Keep the two files together.
+Open `experiments/compare.ipynb`, set `RESULTS` and the `RUNS` mapping, and run
+all cells. Each mapping entry gives a plot label and the folder containing that
+run's manifest and evaluation. This lets the earlier GNN and nested
+`gnn-warmstart-v2/paper` run appear beside the shared Qiskit/TKET baselines.
+Runs without evaluation are excluded. Set `RUNS = None` for the original four
+compiler folders and strict configuration matching.
+
+Explicit run selection permits different training settings and RL action
+registries, with warnings. Inputs, calibration, lockfile, objective, evaluation
+selection/seeds and pass timeout must still match. Differences between these run
+variants cannot be attributed to warm start alone. The source folders are
+recorded in `summary.csv`.
+
+Rerun the last cell to refresh during evaluation. The notebook uses `compare.py`
+and displays the same report inline. Keep the two files together.
 
 Start Jupyter with Matplotlib in an isolated reporting environment:
 

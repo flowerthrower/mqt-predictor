@@ -154,6 +154,57 @@ def test_comparison_rejects_incompatible_inputs_and_duplicates(comparison_result
         compare(comparison_results)
 
 
+def test_comparison_selects_named_run_variants(comparison_results: Path) -> None:
+    """Compare two paper runs separately while flagging method differences."""
+    previous = comparison_results / "paper"
+    current = comparison_results / "warmstart/paper"
+    current.mkdir(parents=True)
+    manifest = json.loads((previous / "manifest.json").read_text())
+    manifest["identity"]["settings"]["paper"] = {"warmstart": {"epochs": 5}}
+    manifest["identity"]["actions"] = ["updated actions"]
+    (current / "manifest.json").write_text(json.dumps(manifest))
+    records = [
+        dict(json.loads(line), final_esp=0.9) for line in (previous / "evaluation.jsonl").read_text().splitlines()
+    ]
+    (current / "evaluation.jsonl").write_text("".join(json.dumps(row) + "\n" for row in records))
+    compare = runpy.run_path(str(ROOT / "experiments/compare.py"))["compare"]
+    report = compare(
+        comparison_results,
+        run_paths={"qiskit": comparison_results / "qiskit", "GNN earlier": previous, "GNN warm start": current},
+    )
+    rows = {row["compiler"]: row for row in report["summary"]}
+    assert report["matched"] == 4
+    assert rows["GNN earlier"]["paired_mean_esp"] == pytest.approx(0.6075)
+    assert rows["GNN warm start"]["paired_mean_esp"] == pytest.approx(0.9)
+    assert rows["GNN warm start"]["method"] == "paper"
+    assert rows["GNN warm start"]["directory"] == str(current)
+    assert any("method/training settings differ" in message for message in report["warnings"])
+    assert any("action registries differ" in message for message in report["warnings"])
+    (previous / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="incompatible settings"):
+        compare(comparison_results)
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value"),
+    [("experiment", "evaluation_seed", 7), ("worker", "pass_timeout_seconds", 30)],
+)
+def test_comparison_variants_require_same_evaluation(
+    comparison_results: Path, section: str, field: str, value: int
+) -> None:
+    """Selecting run variants does not relax evaluation seed or timeout checks."""
+    path = comparison_results / "paper/manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["identity"]["settings"].setdefault(section, {})[field] = value
+    path.write_text(json.dumps(manifest))
+    compare = runpy.run_path(str(ROOT / "experiments/compare.py"))["compare"]
+    with pytest.raises(ValueError, match=f"incompatible {section}.{field}"):
+        compare(
+            comparison_results,
+            run_paths={"qiskit": comparison_results / "qiskit", "GNN": comparison_results / "paper"},
+        )
+
+
 def test_comparison_without_valid_results(comparison_results: Path) -> None:
     """An all-failed evaluation has no quality estimate, rather than a zero ESP."""
     for path in comparison_results.glob("*/evaluation.jsonl"):

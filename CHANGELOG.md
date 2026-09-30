@@ -12,6 +12,8 @@ releases may include breaking changes.
 
 ### Added
 
+- ✨ Compare named SCASIA run folders together in the notebook, including
+  multiple GNN variants ([SCASIA experiments]) ([**@flowerthrower**])
 - ✨ Add an opt-in GNN policy with a tuned paper preset and SB3 training using
   the shared timestep budget ([#800]) ([**@flowerthrower**])
 - ✨ Add opt-in per-pass timeouts for RL training and inference ([#798])

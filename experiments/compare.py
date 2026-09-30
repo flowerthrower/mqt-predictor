@@ -29,17 +29,23 @@ COMPILERS = ("qiskit", "tket", "original", "paper")
 COLORS = ("#527b9f", "#b4773c", "#79836a", "#795aaa")
 
 
-def compare(results: Path) -> dict[str, Any]:
+def compare(results: Path, *, run_paths: dict[str, Path] | None = None) -> dict[str, Any]:
     """Match valid repetitions across available rows and retain every failure count."""
     manifests = {}
     runs = {}
     warnings = []
-    for name in COMPILERS:
-        manifest_path = results / name / "manifest.json"
-        evaluation_path = results / name / "evaluation.jsonl"
+    paths = run_paths if run_paths is not None else {name: results / name for name in COMPILERS}
+    for name, path in paths.items():
+        manifest_path = path / "manifest.json"
+        evaluation_path = path / "evaluation.jsonl"
         if not manifest_path.is_file() or not evaluation_path.is_file():
             warnings.append(f"{name}: excluded; manifest or evaluation file is missing.")
             continue
+        manifest = json.loads(manifest_path.read_text())
+        compiler = manifest["identity"]["compiler"]
+        if compiler not in COMPILERS or (run_paths is None and compiler != name):
+            msg = f"{name}: incorrect compiler in manifest."
+            raise ValueError(msg)
         records = {}
         with evaluation_path.open() as stream:
             for line in stream:
@@ -48,7 +54,7 @@ def compare(results: Path) -> dict[str, Any]:
                     break
                 row = json.loads(line)
                 key = (row["circuit"], row["repetition"])
-                if row["compiler"] != name or key in records:
+                if row["compiler"] != compiler or key in records:
                     msg = f"{name}: wrong compiler or duplicate repetition {key}."
                     raise ValueError(msg)
                 records[key] = row
@@ -56,30 +62,54 @@ def compare(results: Path) -> dict[str, Any]:
             warnings.append(f"{name}: excluded; no completed evaluation records yet.")
             continue
         runs[name] = records
-        manifests[name] = json.loads(manifest_path.read_text())
+        manifests[name] = manifest
     if not runs:
         return {"summary": [], "paired": [], "runtimes": {}, "warnings": warnings, "matched": 0}
     reference_name = next(iter(manifests))
     reference = manifests[reference_name]["identity"]
     for name, manifest in manifests.items():
         identity = manifest["identity"]
-        if identity["compiler"] != name:
-            msg = f"{name}: incorrect compiler in manifest."
-            raise ValueError(msg)
-        for field in ("inputs", "target", "lock_sha256", "settings"):
+        for field in ("inputs", "target", "lock_sha256"):
             if identity[field] != reference[field]:
                 msg = f"{name}: incompatible {field}; use runs from the same experiment configuration."
                 raise ValueError(msg)
+        if identity["settings"] != reference["settings"]:
+            if run_paths is None:
+                msg = f"{name}: incompatible settings; use runs from the same experiment configuration."
+                raise ValueError(msg)
+            for section, fields in (
+                ("experiment", ("objective", "evaluation_circuits", "evaluation_repetitions", "evaluation_seed")),
+                ("worker", ("pass_timeout_seconds",)),
+            ):
+                for field in fields:
+                    if identity["settings"].get(section, {}).get(field) != reference["settings"].get(section, {}).get(
+                        field
+                    ):
+                        msg = f"{name}: incompatible {section}.{field}."
+                        raise ValueError(msg)
+            warnings.append(
+                f"{name}: method/training settings differ from {reference_name}; this compares run variants."
+            )
         warnings.extend(
             f"{name}: {field} differs from {reference_name}; check provenance before interpreting differences."
             for field in ("source_sha256", "dependencies", "python")
             if identity[field] != reference[field]
         )
-    if {"original", "paper"} <= manifests.keys() and (
-        manifests["original"]["identity"]["actions"] != manifests["paper"]["identity"]["actions"]
+    if (
+        run_paths is None
+        and {"original", "paper"} <= manifests.keys()
+        and (manifests["original"]["identity"]["actions"] != manifests["paper"]["identity"]["actions"])
     ):
         msg = "The two RL rows have different action registries."
         raise ValueError(msg)
+    if run_paths is not None:
+        registries = {
+            json.dumps(manifest["identity"]["actions"], sort_keys=True)
+            for manifest in manifests.values()
+            if manifest["identity"]["compiler"] in {"original", "paper"}
+        }
+        if len(registries) > 1:
+            warnings.append("RL action registries differ; differences cannot be attributed to warm start alone.")
     settings = reference["settings"]["experiment"]
     circuits = sorted(name for name in reference["inputs"]["circuits"] if name.startswith("test/"))
     if settings["evaluation_circuits"]:
@@ -117,6 +147,8 @@ def compare(results: Path) -> dict[str, Any]:
         runtimes[name] = [row["runtime_seconds"] for row in records.values()]
         summary.append({
             "compiler": name,
+            "method": manifests[name]["identity"]["compiler"],
+            "directory": str(paths[name]),
             "completed": len(records),
             "expected": len(expected),
             "valid": len(valid[name]),
@@ -179,6 +211,10 @@ def write_report(report: dict[str, Any], output: Path) -> None:
                 "original": ("MQT Predictor", "#703b9c", "D"),
                 "paper": ("Proposed Method", "blue", "^"),
             }
+            styles = {
+                name: styles.get(name, (name, COLORS[index % len(COLORS)], ("D", "^")[index % 2]))
+                for index, name in enumerate(compilers)
+            }
             for index, row in enumerate(grouped):
                 axis.axvspan(index - 0.5, index + 0.5, color="0.90" if index % 2 else "0.95", zorder=0)
                 values = [row[name] for name in compilers]
@@ -232,9 +268,10 @@ def write_report(report: dict[str, Any], output: Path) -> None:
         axes[0].bar(compilers, heights, bottom=bottom, label=status, color=color)
         bottom = [a + b for a, b in zip(bottom, heights, strict=True)]
     axes[0].set(title="Completion and failures", ylabel="% of expected repetitions", ylim=(0, 105))
-    axes[0].legend(loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=3, fontsize=8)
+    axes[0].set_xticks(range(len(compilers)), compilers, rotation=20, ha="right")
+    axes[0].legend(loc="upper center", bbox_to_anchor=(0.5, -0.28), ncol=3, fontsize=8)
     for index, name in enumerate(compilers, start=1):
-        color = COLORS[COMPILERS.index(name)]
+        color = COLORS[COMPILERS.index(name)] if name in COMPILERS else COLORS[(index - 1) % len(COLORS)]
         if paired:
             values = [row[name] for row in paired]
             axes[1].boxplot(values, positions=[index], widths=0.45, showfliers=False)
@@ -245,7 +282,7 @@ def write_report(report: dict[str, Any], output: Path) -> None:
     axes[1].set(title="ESP · matched valid repetitions", ylabel="Mean ESP per circuit", ylim=(0, 1.03))
     axes[2].set(title="Runtime · all completed attempts", ylabel="Wall time (seconds, log scale)", yscale="log")
     for axis in axes[1:]:
-        axis.set_xticks(range(1, len(compilers) + 1), compilers)
+        axis.set_xticks(range(1, len(compilers) + 1), compilers, rotation=20, ha="right")
         axis.set_xlim(0.5, len(compilers) + 0.5)
         axis.grid(axis="y", alpha=0.15)
     if not paired:
@@ -298,7 +335,7 @@ svg{{width:100%;height:auto;background:white;margin:16px 0}} table{{border-colla
 th,td{{padding:10px;border-bottom:1px solid #ddd;text-align:right}}th:first-child,td:first-child{{text-align:left}}
 .scroll{{overflow:auto}}.warning{{background:#fff0d9;padding:12px}}.muted{{color:#606870;overflow-wrap:anywhere}}</style>
 <h1>SCASIA comparison</h1>{warnings}
-<p>Included rows: {", ".join(compilers)}.</p>
+<p>Included rows: {html.escape(", ".join(compilers))}.</p>
 <p>Quality uses {report["matched"]} repetitions valid in all included rows, covering {len(paired)} circuits.
 Each circuit contributes one mean, with the same repetitions for every compiler; no best-of-N selection.
 Failures and missing runs are shown separately, never converted to zero ESP.</p>
