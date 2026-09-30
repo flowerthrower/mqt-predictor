@@ -37,6 +37,8 @@ releases may include breaking changes.
 
 ### Changed
 
+- ✨ Use terminal-only ESP, gamma 1.0, and observed canonical no-op masks for
+  SCASIA paper runs ([SCASIA experiments]) ([**@flowerthrower**])
 - 🐛 Preserve TKET and Qiskit routing permutations across repeated routing,
   independently of measurements ([#831]) ([**@flowerthrower**])
 - 🐛 Unroll custom gate definitions before RL basis translation and collect and
@@ -60,6 +62,8 @@ releases may include breaking changes.
 
 ### Fixed
 
+- 🐛 Ignore barriers when scoring SCASIA routing validity ([SCASIA experiments])
+  ([**@flowerthrower**])
 - 🐛 Keep GNN PPO likelihoods consistent across rollouts and updates, ignore
   barriers in action masks, and permit preserving TKET optimizations after
   layout in the SCASIA paper experiment ([SCASIA experiments])

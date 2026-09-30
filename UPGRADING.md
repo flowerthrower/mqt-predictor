@@ -6,6 +6,14 @@ of changes including minor and patch releases, please refer to the
 
 ## [Unreleased]
 
+### SCASIA experiment runs
+
+The paper row now uses terminal-only ESP, gamma 1.0, and masks canonical Qiskit
+actions after they leave the circuit, layout, and retained pass properties
+unchanged. Start fresh training in `gnn-warmstart-v3/paper`; the default TOML
+selects this new output directory. Older checkpoints cannot resume across this
+source change. Original-mode rewards and masks are unchanged.
+
 ### GNN RL models
 
 GNN support requires the optional `gnn` extra and `graph=True`. Select

@@ -20,6 +20,11 @@ concurrent writers. Paths are relative to the TOML file. Do not set
 `GITHUB_ACTIONS`: the shared BQSKit actions use reduced settings under that
 flag.
 
+The checked-in configuration starts a fresh `gnn-warmstart-v3` run below
+`../../scasia-runs`, relative to the TOML file. The paper row trains and
+evaluates in `gnn-warmstart-v3/paper`. Use this new output directory after
+updating; do not resume a v1 or v2 checkpoint with the changed reward and masks.
+
 ## Configuration and recovery
 
 Defaults are ESP, 100,000 requested training steps, 32 actions per episode, seed
@@ -60,16 +65,28 @@ passes. Barriers do not count as multi-qubit gates or routing interactions.
 Fully preserving TKET optimizations, currently `RemoveRedundancies`, remain
 available after layout in paper mode; original mode retains its legacy filter.
 
+In paper mode, a canonical Qiskit action that leaves the circuit, layout, and
+retained Qiskit properties unchanged is masked until another action changes that
+state. These actions use a fixed compilation seed within each episode. Reset and
+non-native actions clear the mask history; non-native actions rebuild the
+worker's Qiskit graph. This rule does not compare ESP, reject changed outputs,
+or suppress other SDK actions. Termination remains available whenever the
+circuit is complete.
+
 The RL `VF2PostLayout` action uses the standard Qiskit pass on the unchanged
 physical target, with the SDK's seed. It has no custom placement cost or ESP
 acceptance check. The native Qiskit and TKET baseline pipelines are unchanged.
 
 `original.ppo` lists the legacy PPO settings, including gamma 0.98 and
-2,048-step rollouts. `paper.gnn` overrides `GNNConfig.paper()`; an empty table
-uses that configuration unchanged. Full rollouts make the default effective
-budget 100,352 steps. The manifest records requested, effective, and actual
-steps and the optimizer defaults. The original discrete million-value depth
-encoding is preserved, including SB3's large one-hot input layer.
+2,048-step rollouts. `paper.gnn` overrides `GNNConfig.paper()` with gamma 1.0.
+The paper reward is terminal-only ESP: intermediate passes receive zero reward,
+and complete circuits receive final ESP at termination or the 32-action cap.
+Invalid endings and pass failures retain the terminal penalty. Gamma 1.0 avoids
+discounting the final score of longer compilations. Full rollouts make the
+default effective budget 100,352 steps. The manifest records requested,
+effective, and actual steps and the optimizer defaults. The original discrete
+million-value depth encoding is preserved, including SB3's large one-hot input
+layer.
 
 ### O3 demonstrations and warm start
 
@@ -110,8 +127,8 @@ uv run python -m mqt.predictor.rl.experiments.scasia --compiler paper --config P
 
 Keep the other settings identical and retain the native Qiskit/TKET references.
 This separates gains from imitation and subsequent RL. The original PPO row has
-no imitation stage. Discounting and reward shaping are unchanged; faster or
-higher-quality inference must be demonstrated by evaluation, including GNN time.
+no imitation stage. Faster or higher-quality inference must be demonstrated by
+evaluation, including GNN time.
 
 One rolling `checkpoint.zip` is replaced after each complete imitation epoch and
 every 2,048-step PPO update. `warmstart.zip` retains the imitation model, and
@@ -235,12 +252,13 @@ reuse historical paper values or claim identical results.
   terminate with zero reward. The new 32-action cap gives zero reward and
   external truncation with SB3 bootstrapping.
 - `paper` uses the current v3 transitions, normalized observations, remaining
-  budget, GNN, intermediate rewards and #830 endings: valid termination/horizon
-  earns final ESP; invalid horizons and failures receive the terminal penalty
-  without bootstrapping. Both RL rows share the updated action registry,
-  correctness fixes and SDK availability checks. ESP and the updated actions are
-  deliberate additions to the original method. The paper row uses current SB3
-  training; it does not restore the prototype's custom PPO trainer.
+  budget, GNN, terminal-only rewards, gamma 1.0, observed no-op masks, and #830
+  endings: valid termination/horizon earns final ESP; invalid horizons and
+  failures receive the terminal penalty without bootstrapping. Both RL rows
+  share the updated action registry, correctness fixes and SDK availability
+  checks. ESP and the updated actions are deliberate additions to the original
+  method. The paper row uses current SB3 training; it does not restore the
+  prototype's custom PPO trainer.
 
 ## Timeouts and recorded results
 

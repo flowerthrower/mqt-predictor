@@ -34,7 +34,10 @@ def observe(circuit: QuantumCircuit, target: Target, *, physical: bool) -> dict[
     native = all(item.operation.name in target.operation_names or item.operation.name == "barrier" for item in circuit)
     edges = set(target.build_coupling_map().get_edges())
     routed = physical and all(
-        len(item.qubits) != 2 or tuple(circuit.find_bit(q).index for q in item.qubits) in edges for item in circuit
+        item.operation.name == "barrier"
+        or len(item.qubits) != 2
+        or tuple(circuit.find_bit(q).index for q in item.qubits) in edges
+        for item in circuit
     )
     result: dict[str, Any] = {
         "state": {"synthesis": native, "layout": physical, "routing": routed},

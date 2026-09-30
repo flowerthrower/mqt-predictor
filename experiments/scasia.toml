@@ -8,7 +8,7 @@
 
 # Paths are relative to this TOML file. Use a shared cluster scratch directory for output.
 assets = "assets"
-output = "../../scasia-runs"
+output = "../../scasia-runs/gnn-warmstart-v3"
 
 [experiment]
 objective = "estimated_success_probability"
@@ -52,7 +52,8 @@ bqskit_port = 18472
 bqskit_worker_port = 18474
 
 [paper.gnn]
-# Overrides for GNNConfig.paper(); leave empty for the paper configuration.
+# Terminal-only ESP with no discount for longer compilations.
+gamma = 1.0
 
 [paper.warmstart]
 # Replay O3 on the training split, imitate its accepted actions, then run PPO.

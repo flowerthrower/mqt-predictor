@@ -321,6 +321,10 @@ def test_distinct_methods_shared_actions(inputs: Inputs, config: dict[str, Any])
     registry = {kind: [action.name for action in actions] for kind, actions in get_actions_by_pass_type().items()}
     old = scasia.make_env("original", config, inputs)
     paper = scasia.make_env("paper", config, inputs)
+    assert config["original"]["ppo"]["gamma"] == pytest.approx(0.98)
+    assert config["paper"]["gnn"]["gamma"] == pytest.approx(1.0)
+    assert not old.intermediate_reward
+    assert not paper.intermediate_reward
     assert registry == {
         kind: [action.name for action in actions] for kind, actions in get_actions_by_pass_type().items()
     }
@@ -392,9 +396,10 @@ def test_native_optimizations_preserve_compilation(
     action = next(index for index, candidate in env.action_set.items() if candidate.name == action_name)
     assert env.action_masks()[action]
     try:
-        _, _, terminated, truncated, _ = env.step(action)
+        _, reward, terminated, truncated, _ = env.step(action)
         assert env.last_result["status"] == "ok"
         assert env.trace[0]["name"] == action_name
+        assert reward == 0
         assert not terminated
         assert not truncated
         assert env.action_masks()[env.action_terminate_index]
@@ -403,8 +408,67 @@ def test_native_optimizations_preserve_compilation(
         assert Operator(env.state).equiv(Operator(original))
         assert env.layout is not None
         assert env.layout.final_index_layout() == [0, 1]
-        assert env.step(env.action_terminate_index)[2:4] == (True, False)
+        assert env.step(env.action_terminate_index)[1:4] == (env.calculate_reward(), True, False)
         assert env.trace[-1]["name"] == "terminate"
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("mode", ["original", "paper"])
+def test_native_no_effect_action_mask(mode: str, inputs: Inputs, config: dict[str, Any]) -> None:
+    """Mask a native no-op only in paper mode, until a circuit change or reset."""
+    env = ready_env(mode, inputs, config)
+    env.state.sx(0)
+    env.state.sx(0)
+    actions = {action.name: index for index, action in env.action_set.items()}
+    no_op = actions["RemoveIdentityEquivalent"]
+    optimization = actions["Optimize1qGatesDecomposition_preserve"]
+    original = env.state.copy()
+    properties = env.qiskit_properties.copy()
+    try:
+        env.step(no_op)
+        assert env.last_result["status"] == "ok"
+        assert env.state == original
+        assert env.qiskit_properties != properties
+        assert env.action_masks()[no_op]
+        env.step(no_op)
+        assert env.last_result["status"] == "ok"
+        assert env.state == original
+        assert env.action_masks()[no_op] is (mode == "original")
+        assert env.action_masks()[env.action_terminate_index]
+        env.step(optimization)
+        assert env.last_result["status"] == "ok"
+        assert env.state != original
+        assert env.action_masks()[no_op]
+        env.step(no_op)
+        assert env.action_masks()[no_op] is (mode == "original")
+        if mode == "paper":
+            compiled = env.state.copy()
+            env.step(actions["RemoveRedundancies"])
+            assert env.last_result["status"] == "ok"
+            assert env.state == compiled
+            assert env.action_masks()[no_op]
+            env.step(no_op)
+            assert not env.action_masks()[no_op]
+        env.reset(original, seed=0)
+        assert env.action_masks()[no_op]
+    finally:
+        env.close()
+
+
+def test_layout_only_progress_is_not_no_effect(inputs: Inputs, config: dict[str, Any]) -> None:
+    """Assigning physical wires is progress even when an empty circuit stays unchanged."""
+    env = scasia.make_env("paper", config, inputs)
+    circuit = QuantumCircuit(env.device.num_qubits)
+    env.reset(circuit, seed=0)
+    action = next(index for index, candidate in env.action_set.items() if candidate.name == "VF2Layout")
+    try:
+        env.step(action)
+        assert env.last_result["status"] == "ok"
+        assert env.state == circuit
+        assert env.layout is not None
+        assert action not in env.no_effect_actions
+        assert env.action_masks()[env.action_terminate_index]
     finally:
         env.close()
 
@@ -445,6 +509,11 @@ def test_tket_preserving_optimization_after_layout(mode: str, inputs: Inputs, co
         assert env.layout is not None
         assert env.layout.final_index_layout() == [2, 0, 1]
         assert env.action_masks()[env.action_terminate_index]
+        compiled = env.state.copy()
+        env.step(action)
+        assert env.last_result["status"] == "ok"
+        assert env.state == compiled
+        assert env.action_masks()[action]
     finally:
         env.close()
 
@@ -514,11 +583,13 @@ def test_o3_teacher_replay(name: str, inputs: Inputs, config: dict[str, Any], mo
     monkeypatch.setattr(inputs, "names", lambda split: [f"{split}/{name}_indep.qasm"])
     env = scasia.make_env("paper", config, inputs)
     try:
-        samples, report = collect_demonstrations(scasia.NormalizedGNNObservationWrapper(env), 0, 0.98)
+        samples, report = collect_demonstrations(
+            scasia.NormalizedGNNObservationWrapper(env), 0, config["paper"]["gnn"]["gamma"]
+        )
         assert len(report["circuits"]) == 1
         assert report["transitions"] == len(samples) <= 32
         assert report["circuits"][0]["actions"][-1] == "terminate"
-        assert samples[-1][3] == pytest.approx(report["circuits"][0]["esp"])
+        assert all(value == pytest.approx(report["circuits"][0]["esp"]) for _, _, _, value in samples)
         assert all(mask[action] for _, mask, action, _ in samples)
         if name == "ae_7":
             consolidated = next(trace for trace in env.trace if trace["name"] == "ConsolidateBlocks")
@@ -746,6 +817,24 @@ def test_efficiency_formulas() -> None:
     assert metrics["timed_out_passes"] == 1
     assert metrics["analysis_invocations"] == 1
     assert efficiency([])["ppe"] is None
+
+
+def test_physical_barrier_does_not_require_coupling(inputs: Inputs) -> None:
+    """A barrier across nonadjacent wires stays exact; a real two-qubit gate does not."""
+    _, target = load_target(inputs.path)
+    assert not target.instruction_supported("cz", (0, 2))
+    circuit = QuantumCircuit(3, 1)
+    circuit.x(0)
+    circuit.barrier(0, 2)
+    circuit.measure(0, 0)
+    score = observe(circuit, target, physical=True)
+    assert score["state"]["routing"]
+    assert score["esp_kind"] == "exact"
+    assert score["esp"] == estimated_success_probability(circuit, target)
+    circuit.cz(0, 2)
+    score = observe(circuit, target, physical=True)
+    assert not score["state"]["routing"]
+    assert score["esp_kind"] != "exact"
 
 
 @pytest.mark.parametrize("multiple_registers", [False, True])

@@ -118,7 +118,7 @@ class ExperimentEnv(PredictorEnv):
             reward_function=settings["objective"],
             max_steps=settings["episode_actions"],
             mdp="v2" if mode == "original" else "v3",
-            intermediate_reward=mode == "paper",
+            intermediate_reward=False,
             reward_scale=settings["reward_scale"],
             no_effect_penalty=settings["no_effect_penalty"],
         )
@@ -131,6 +131,7 @@ class ExperimentEnv(PredictorEnv):
         self.worker_startup_seconds = 0.0
         self.compiler_seed = 0
         self.qiskit_properties: dict[str, Any] = {}
+        self.no_effect_actions: set[int] = set()
         self.episode = 0
 
     def reset(
@@ -146,6 +147,7 @@ class ExperimentEnv(PredictorEnv):
             qc = self.inputs.circuit(names[int(self.np_random.integers(len(names)))])
         self.trace = []
         self.last_result = {}
+        self.no_effect_actions.clear()
         self.worker_startup_seconds = 0.0
         self.compiler_seed = seed if seed is not None else int(self.np_random.integers(0, np.iinfo(np.int32).max))
         observation, info = super().reset(qc, seed=None, options=options)
@@ -157,7 +159,7 @@ class ExperimentEnv(PredictorEnv):
         return observation, info
 
     def action_masks(self) -> list[bool]:
-        """Apply SDK preconditions and permit structure-preserving TKET optimizations in paper mode."""
+        """Apply SDK preconditions and suppress observed canonical no-ops in paper mode."""
         masks = super().action_masks()
         for index, action in self.action_set.items():
             if action.name == "ElidePermutations":
@@ -168,6 +170,8 @@ class ExperimentEnv(PredictorEnv):
                 masks[index] = self._current_laid_out and self._current_routed
             elif self.mode == "paper" and action.origin == CompilationOrigin.TKET:
                 masks[index] |= index in self.valid_actions and index in self.actions_structure_preserving_indices
+            if self.mode == "paper" and index in self.no_effect_actions:
+                masks[index] = False
         return masks
 
     def _get_stepwise_reward(self) -> tuple[float, str]:
@@ -195,8 +199,20 @@ class ExperimentEnv(PredictorEnv):
             self.trace.append(entry)
         if result["status"] != "ok":
             raise RuntimeError(result["error"])
+        properties = result.pop("qiskit_properties", self.qiskit_properties)
+        if self.mode == "paper":
+            # Native Qiskit actions reuse one compilation seed throughout the episode.
+            if (
+                self.action_set[action_index].name not in NATIVE_ACTIONS
+                or self.state != result["circuit"]
+                or self.layout != result["circuit"].layout
+                or self.qiskit_properties != properties
+            ):
+                self.no_effect_actions.clear()
+            else:
+                self.no_effect_actions.add(action_index)
         self.layout = result["circuit"].layout
-        self.qiskit_properties = result.pop("qiskit_properties", self.qiskit_properties)
+        self.qiskit_properties = properties
         return result["circuit"]
 
     def close(self) -> None:
