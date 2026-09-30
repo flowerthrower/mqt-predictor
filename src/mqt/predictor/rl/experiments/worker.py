@@ -25,7 +25,8 @@ from bqskit.compiler import Compiler
 from pytket.circuit import Qubit
 from pytket.extensions.qiskit import IBMQBackend, qiskit_to_tk, tk_to_qiskit
 from pytket.passes import BasePass as TketBasePass
-from qiskit.converters import dag_to_circuit
+from qiskit.converters import circuit_to_dag, dag_to_circuit
+from qiskit.passmanager import PropertySet
 from qiskit.transpiler import Layout, TranspileLayout
 from qiskit.transpiler.basepasses import BasePass
 from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
@@ -36,6 +37,7 @@ from mqt.predictor.rl.predictorenv import PredictorEnv
 from .environment import configure_actions
 from .inputs import load_target
 from .metrics import observe
+from .qiskit_teacher import NATIVE_ACTIONS, apply_native_action, demonstration
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -372,12 +374,18 @@ def _worker_main(connection: Connection, assets: Path, settings: dict[str, Any])
     )
     configure_actions(env)
     connection.send(("ready", None))
+    qiskit_dag = None
+    episode = None
     while True:
         request = connection.recv()
         observer = PassObserver(connection, target)
         try:  # ruff: ignore[too-many-statements-in-try-clause] -- SDK exceptions are returned to the watchdog.
             mode = request["compiler"]
             circuit = request["circuit"]
+            extra = {}
+            if request.get("episode") != episode or mode not in {"paper", "original"}:
+                qiskit_dag = None
+            episode = request.get("episode")
             if mode in {"original", "paper"}:
                 env.reset(circuit, seed=request["seed"])
                 env.layout = request["layout"]
@@ -385,13 +393,47 @@ def _worker_main(connection: Connection, assets: Path, settings: dict[str, Any])
                 observer.physical = env.layout is not None
                 action = env.action_set[request["action"]]
                 entry = observer.begin(action.name, action.pass_type.value, circuit)
-                result = env.apply_action(request["action"])
+                properties = request.get(
+                    "qiskit_properties",
+                    {
+                        "original_qubit_indices": {qubit: i for i, qubit in enumerate(circuit.qubits)},
+                        "num_input_qubits": request["input_qubits"],
+                    },
+                )
+                if env.layout is not None and not properties.get("layout"):
+                    env.layout.write_into_property_set(properties)
+                if action.name in NATIVE_ACTIONS:
+                    result, env.layout, properties, qiskit_dag = apply_native_action(
+                        action.name,
+                        circuit,
+                        target,
+                        request["seed"],
+                        properties,
+                        qiskit_dag,
+                        physical=env.layout is not None,
+                    )
+                else:
+                    qiskit_dag = None
+                    result = env.apply_action(request["action"])
+                    if env.layout is not None:
+                        permutation = (
+                            properties.get("virtual_permutation_layout") if not properties.get("layout") else None
+                        )
+                        env.layout.write_into_property_set(properties)
+                        if permutation is not None:
+                            properties["virtual_permutation_layout"] = permutation
+                            env.layout = TranspileLayout.from_property_set(
+                                circuit_to_dag(result), PropertySet(properties)
+                            )
+                extra["qiskit_properties"] = properties
                 result._layout = env.layout  # ruff: ignore[private-member-access]
                 observer.physical = env.layout is not None
                 observer.end(entry, result)
             else:
                 with observe_qiskit_passes(observer):
-                    if mode == "qiskit":
+                    if mode == "teacher":
+                        result, extra["teacher_actions"] = demonstration(circuit, target, request["seed"])
+                    elif mode == "qiskit":
                         result = generate_preset_pass_manager(
                             optimization_level=3, target=target, seed_transpiler=request["seed"]
                         ).run(circuit)
@@ -402,6 +444,7 @@ def _worker_main(connection: Connection, assets: Path, settings: dict[str, Any])
                 "result",
                 {
                     "status": "ok",
+                    **extra,
                     "circuit": result,
                     "score": observer.score(result),
                     "final_layout": result.layout.final_index_layout() if result.layout is not None else None,

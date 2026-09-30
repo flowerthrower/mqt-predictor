@@ -27,8 +27,11 @@ Defaults are ESP, 100,000 requested training steps, 32 actions per episode, seed
 stochastically with a recorded seed for each repetition. Every repetition is
 retained; there is no best-of-N policy selection. The native TKET pipeline
 retains its fixed LightSABRE seed 0; shared BQSKit actions retain seed 10.
-Qiskit uses the repetition seed. The Qiskit baseline retains its native trial
-budget; RL SABRE actions use one seeded layout trial and one swap trial.
+Qiskit uses the repetition seed. The Qiskit actions used by the teacher use O3's
+SDK parameters, including `QiskitSabreMapping`'s search budget and VF2 settings,
+with one compilation seed per episode. The separate `SabreSwap` action retains
+its shared implementation. This aligns the teacher's primitives with the native
+reference; it does not add an outer best-of-N compilation selection.
 
 Both RL rows exclude `QiskitO3`. They expose
 `Optimize1qGatesDecomposition_preserve` and `Opt2qBlocks_preserve` as separate
@@ -38,10 +41,20 @@ directory; existing checkpoints cannot be resumed with this action set. The
 paper graph input also keeps normalized qubit count and depth instead of
 overwriting them with raw values. This input change requires fresh training too.
 
+Both RL rows additionally expose canonical `ConsolidateBlocks` and
+`TwoQubitPeepholeOptimization`. `ElidePermutations` removes virtual swaps
+without committing to a physical layout. Its output permutation survives
+subsequent mapping. `VF2PostLayout_2q` is the SDK's standard configuration
+before translation; `VF2PostLayout` is its configuration for native gates. The
+paper mask allows the former on routed physical circuits before synthesis.
+Qiskit's native graph is kept inside the worker between actions: rebuilding it
+can change later synthesis choices even when the rebuilt circuit is equivalent.
+Intermediate consolidated unitary blocks have unavailable proxy rewards; final
+scores still use the shared ESP calculation.
+
 The RL `VF2PostLayout` action uses the standard Qiskit pass on the unchanged
-physical target, with a seeded invocation. It has no custom placement cost or
-ESP acceptance check. The native Qiskit and TKET baseline pipelines are
-unchanged.
+physical target, with the SDK's seed. It has no custom placement cost or ESP
+acceptance check. The native Qiskit and TKET baseline pipelines are unchanged.
 
 `original.ppo` lists the legacy PPO settings, including gamma 0.98 and
 2,048-step rollouts. `paper.gnn` overrides `GNNConfig.paper()`; an empty table
@@ -50,15 +63,54 @@ budget 100,352 steps. The manifest records requested, effective, and actual
 steps and the optimizer defaults. The original discrete million-value depth
 encoding is preserved, including SB3's large one-hot input layer.
 
-One rolling `checkpoint.zip` is replaced after every 2,048-step PPO update;
+### O3 demonstrations and warm start
+
+`paper.warmstart` defaults to five imitation epochs with batches of eight
+graphs. Before fitting, the runner compiles all 321 training circuits with
+native O3 and replays its accepted individual actions through the actual
+environment. It omits no-ops and suffixes that O3 itself rolled back. Layout
+bookkeeping stays attached to the relevant canonical action. The replay must fit
+the configured episode limit, obey the action masks, and reproduce the final
+circuit, logical-output mapping, and ESP. Any mismatch stops training; no
+circuit is silently excluded. The evaluation split supplies no demonstrations.
+
+The GNN learns masked action labels and discounted demonstration returns, then
+continues with ordinary PPO rollouts. The teacher is never called during RL
+evaluation. `teacher.json` records each verified sequence, reference score,
+native pass count, and runtime. The manifest records imitation losses, training
+action accuracy, and separate demonstration/fit costs. Imitation is additional
+training work; its transitions are not counted as PPO timesteps. The five-epoch
+default is an initial setting, not a claim that the learned policy matches O3.
+
+Use separate TOML files and output roots for these ablations:
+
+```bash
+uv run python -m mqt.predictor.rl.experiments.scasia --compiler paper --config PATH
+```
+
+| Variant                  | `paper.warmstart.epochs` | `experiment.training_timesteps` |
+| ------------------------ | -----------------------: | ------------------------------: |
+| RL from scratch          |                        0 |                          100000 |
+| Imitation only           |                        5 |                               0 |
+| Imitation followed by RL |                        5 |                          100000 |
+
+Keep the other settings identical and retain the native Qiskit/TKET references.
+This separates gains from imitation and subsequent RL. The original PPO row has
+no imitation stage. Discounting and reward shaping are unchanged; faster or
+higher-quality inference must be demonstrated by evaluation, including GNN time.
+
+One rolling `checkpoint.zip` is replaced after each complete imitation epoch and
+every 2,048-step PPO update. `warmstart.zip` retains the imitation model, and
 `final.zip` is saved at completion. `checkpoint_steps` must be a multiple of
 both configured rollout sizes. Use the same command with `--resume` after
 interruption. Resume checks configuration, code, dependency versions, frozen
 inputs, and the identity embedded in the checkpoint. It records the restart and
-trains only the remaining budget. Environment state, partial rollouts, and
-random-generator state are not restored; continuation is not bit-identical.
-Completed evaluation rows are skipped on resume, and an incomplete final JSON
-line is discarded. Use a new output directory when changing settings or code.
+trains only the remaining budget. An interrupted imitation phase regenerates and
+verifies the demonstrations, then resumes after its last complete epoch.
+Environment state, partial rollouts, and random-generator state are not
+restored; continuation is not bit-identical. Completed evaluation rows are
+skipped on resume, and an incomplete final JSON line is discarded. Use a new
+output directory when changing settings or code.
 
 BQSKit block synthesis now rejects results above its synthesis tolerance,
 including inaccurate results returned when QSearch or LEAP exhausts the

@@ -10,16 +10,24 @@
 
 from __future__ import annotations
 
+from copy import copy
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from gymnasium import Env
 from gymnasium.spaces import Box, Dict, Discrete
-from qiskit.transpiler.passes import Collect2qBlocks, ConsolidateBlocks, Optimize1qGatesDecomposition, UnitarySynthesis
+from qiskit.transpiler.passes import (
+    Collect2qBlocks,
+    ConsolidateBlocks,
+    Optimize1qGatesDecomposition,
+    UnitarySynthesis,
+)
 
 from mqt.predictor.rl.actions.base import CompilationOrigin, DeferredDeviceAction, PassType
 from mqt.predictor.rl.predictorenv import PredictorEnv
 from mqt.predictor.utils import calc_supermarq_features
+
+from .qiskit_teacher import NATIVE_ACTIONS, native_passes
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -34,7 +42,8 @@ LEGACY_FEATURES = ("program_communication", "critical_depth", "entanglement_rati
 
 
 def configure_actions(env: PredictorEnv) -> None:
-    """Replace the O3 optimization loop with two separately selectable native actions."""
+    """Expose individual canonical SDK actions with the settings needed to replay O3."""
+    env.action_set = {index: copy(action) for index, action in env.action_set.items()}
     index = next(index for index, action in env.action_set.items() if action.name == "QiskitO3")
     env.action_set[index] = DeferredDeviceAction(
         "Optimize1qGatesDecomposition_preserve",
@@ -60,9 +69,40 @@ def configure_actions(env: PredictorEnv) -> None:
         preserves_routing=True,
         preserves_synthesis=True,
     )
-    env.actions_opt_indices.append(index)
-    env.actions_structure_preserving_indices.append(index)
     env.action_terminate_index = index + 1
+    for name in ("ConsolidateBlocks", "TwoQubitPeepholeOptimization", "VF2PostLayout_2q"):
+        env.action_set[env.action_terminate_index + 1] = env.action_set[env.action_terminate_index]
+        env.action_set[env.action_terminate_index] = DeferredDeviceAction(
+            name,
+            CompilationOrigin.QISKIT,
+            PassType.FINAL_OPT if name == "VF2PostLayout_2q" else PassType.OPT,
+            None,
+            preserves_layout=True,
+            preserves_routing=True,
+            preserves_synthesis=name == "TwoQubitPeepholeOptimization",
+        )
+        env.action_terminate_index += 1
+    for action in env.action_set.values():
+        if action.name in NATIVE_ACTIONS:
+            action.transpile_pass = lambda device, name=action.name: native_passes(
+                name, device, 0, physical=name == "TwoQubitPeepholeOptimization"
+            )
+        if action.name == "ElidePermutations":
+            action.pass_type = PassType.OPT
+    for pass_type, attribute in (
+        (PassType.OPT, "actions_opt_indices"),
+        (PassType.LAYOUT, "actions_layout_indices"),
+        (PassType.FINAL_OPT, "actions_final_optimization_indices"),
+    ):
+        setattr(env, attribute, [i for i, action in env.action_set.items() if action.pass_type == pass_type])
+    env.actions_structure_preserving_indices = [
+        i
+        for i, action in env.action_set.items()
+        if action.pass_type == PassType.OPT
+        and action.preserves_layout
+        and action.preserves_routing
+        and action.preserves_synthesis
+    ]
     env.action_space = Discrete(len(env.action_set))
 
 
@@ -89,6 +129,9 @@ class ExperimentEnv(PredictorEnv):
         self.trace: list[dict[str, Any]] = []
         self.last_result: dict[str, Any] = {}
         self.worker_startup_seconds = 0.0
+        self.compiler_seed = 0
+        self.qiskit_properties: dict[str, Any] = {}
+        self.episode = 0
 
     def reset(
         self,
@@ -104,7 +147,32 @@ class ExperimentEnv(PredictorEnv):
         self.trace = []
         self.last_result = {}
         self.worker_startup_seconds = 0.0
-        return super().reset(qc, seed=None, options=options)
+        self.compiler_seed = seed if seed is not None else int(self.np_random.integers(0, np.iinfo(np.int32).max))
+        observation, info = super().reset(qc, seed=None, options=options)
+        self.qiskit_properties = {
+            "original_qubit_indices": {qubit: i for i, qubit in enumerate(self.state.qubits)},
+            "num_input_qubits": self.state.num_qubits,
+        }
+        self.episode += 1
+        return observation, info
+
+    def action_masks(self) -> list[bool]:
+        """Keep virtual permutation elimination before layout and native optimizers after layout."""
+        masks = super().action_masks()
+        for index, action in self.action_set.items():
+            if action.name == "ElidePermutations":
+                masks[index] = masks[index] and self.layout is None
+            elif action.name == "TwoQubitPeepholeOptimization":
+                masks[index] = masks[index] and self.layout is not None and self.is_circuit_synthesized(self.state)
+            elif action.name == "VF2PostLayout_2q" and self.mode == "paper":
+                masks[index] = self._current_laid_out and self._current_routed
+        return masks
+
+    def _get_stepwise_reward(self) -> tuple[float, str]:
+        """The existing basis-translation proxy cannot score consolidated unitary blocks."""
+        if self.state.count_ops().get("unitary"):
+            return 0.0, "unavailable"
+        return super()._get_stepwise_reward()
 
     def apply_action(self, action_index: int) -> QuantumCircuit:
         """Preserve current action implementations and layout bookkeeping."""
@@ -114,7 +182,9 @@ class ExperimentEnv(PredictorEnv):
             "layout": self.layout,
             "input_qubits": self.num_qubits_uncompiled_circuit,
             "action": action_index,
-            "seed": int(self.np_random.integers(0, np.iinfo(np.int32).max)),
+            "seed": self.compiler_seed,
+            "qiskit_properties": self.qiskit_properties,
+            "episode": self.episode,
         })
         self.last_result = result
         self.worker_startup_seconds += result.get("worker_startup_seconds", 0.0)
@@ -124,6 +194,7 @@ class ExperimentEnv(PredictorEnv):
         if result["status"] != "ok":
             raise RuntimeError(result["error"])
         self.layout = result["circuit"].layout
+        self.qiskit_properties = result.pop("qiskit_properties", self.qiskit_properties)
         return result["circuit"]
 
     def close(self) -> None:

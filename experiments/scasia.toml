@@ -53,3 +53,9 @@ bqskit_worker_port = 18474
 
 [paper.gnn]
 # Overrides for GNNConfig.paper(); leave empty for the paper configuration.
+
+[paper.warmstart]
+# Replay O3 on the training split, imitate its accepted actions, then run PPO.
+# Set epochs = 0 for RL from scratch; training_timesteps = 0 for imitation only.
+epochs = 5
+batch_size = 8

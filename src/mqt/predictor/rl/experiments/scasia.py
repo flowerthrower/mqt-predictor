@@ -34,6 +34,7 @@ from mqt.predictor.rl.gnn import GNNConfig, GNNMaskablePPO, GNNObservationWrappe
 from .environment import ExperimentEnv, OriginalEnv
 from .inputs import Inputs, digest, load_target
 from .metrics import efficiency, observe
+from .qiskit_teacher import collect_demonstrations, fit_demonstrations
 from .worker import CompilerWorker
 
 if TYPE_CHECKING:
@@ -54,9 +55,15 @@ def resolve_config(path: Path) -> dict[str, Any]:
     config["output"] = str((path.parent / config["output"]).resolve())
     config["paper"]["gnn"] = asdict(replace(GNNConfig.paper(), **config["paper"]["gnn"]))
     config["original"]["ppo"] = {"clip_range_vf": None, "target_kl": None, **config["original"]["ppo"]}
-    for key in ("episode_actions", "training_timesteps", "evaluation_repetitions", "checkpoint_steps"):
+    for key in ("episode_actions", "evaluation_repetitions", "checkpoint_steps"):
         if config["experiment"][key] <= 0:
             raise ValueError(key)
+    if config["experiment"]["training_timesteps"] < 0:
+        msg = "training_timesteps must be nonnegative"
+        raise ValueError(msg)
+    if config["paper"]["warmstart"]["epochs"] < 0 or config["paper"]["warmstart"]["batch_size"] <= 0:
+        msg = "warmstart requires nonnegative epochs and a positive batch_size"
+        raise ValueError(msg)
     for key in ("pass_timeout_seconds", "startup_timeout_seconds", "threads", "bqskit_workers"):
         if config["worker"][key] <= 0:
             raise ValueError(key)
@@ -127,7 +134,7 @@ def run_identity(config: dict[str, Any], inputs: Inputs, env: ExperimentEnv, com
         "evaluation_sampling": "seeded stochastic; every repetition retained; no best-of-N",
         "native_sdk_seeds": {
             "qiskit": "per-compilation seed",
-            "rl_qiskit_actions": "seeded per action",
+            "rl_qiskit_actions": "one compilation seed per episode; native O3 VF2 seeds and search budgets",
             "tket_lightsabre": 0,
             "bqskit_actions": 10,
         },
@@ -157,7 +164,9 @@ class RollingCheckpoint(BaseCallback):
             "path": path.name,
             "timesteps": self.model.num_timesteps,
             "saved_at": time.time(),
-            "phase": "after PPO update; environment and random-generator state are not restored",
+            "phase": "after PPO update" if self.model.num_timesteps else "imitation",
+            "continuation": "environment and random-generator state are not restored",
+            "warmstart_epochs": self.model.__dict__.get("scasia_warmstart_epochs", 0),
         }
         write_json(self.output / "manifest.json", self.manifest)
 
@@ -178,6 +187,9 @@ def train(
 ) -> None:
     """Train to the requested total budget, completing whole SB3 rollouts."""
     settings = config["experiment"]
+    if settings["training_timesteps"] == 0 and (compiler != "paper" or config["paper"]["warmstart"]["epochs"] == 0):
+        msg = "Zero PPO steps require a paper behavior-cloning run"
+        raise ValueError(msg)
     wrapped = NormalizedGNNObservationWrapper(env) if compiler == "paper" else env
     model_class = GNNMaskablePPO if compiler == "paper" else MaskablePPO
     identity = digest(json.dumps(manifest["identity"], sort_keys=True).encode())
@@ -220,10 +232,42 @@ def train(
     write_json(output / "manifest.json", manifest)
     remaining = max(0, settings["training_timesteps"] - model.num_timesteps)
     callback = RollingCheckpoint(output, manifest, settings["checkpoint_steps"])
+    callback.init_callback(model)
+    if (
+        compiler == "paper"
+        and model.__dict__.get("scasia_warmstart_epochs", 0) < config["paper"]["warmstart"]["epochs"]
+    ):
+        assert isinstance(wrapped, GNNObservationWrapper)
+        assert isinstance(model, GNNMaskablePPO)
+        callback.save("checkpoint")
+        samples, report = collect_demonstrations(wrapped, settings["training_seed"], model.gamma)
+        write_json(output / "teacher.json", report)
+        manifest.setdefault("warmstart", {"epochs": []})
+        manifest["warmstart"]["demonstration_seconds"] = (
+            manifest["warmstart"].get("demonstration_seconds", 0.0) + report["runtime_seconds"]
+        )
+        manifest["warmstart"]["teacher"] = {
+            "file": "teacher.json",
+            "transitions": report["transitions"],
+            "circuits": len(report["circuits"]),
+            "runtime_seconds": report["runtime_seconds"],
+        }
+        started = time.monotonic()
+        previous_fit_seconds = manifest["warmstart"].get("fit_seconds", 0.0)
+
+        def completed_epoch(metrics: dict[str, Any]) -> None:
+            manifest["warmstart"]["epochs"].append(metrics)
+            manifest["warmstart"]["fit_seconds"] = previous_fit_seconds + time.monotonic() - started
+            callback.save("checkpoint")
+            print(f"Behavior cloning: {metrics}", flush=True)
+
+        fit_demonstrations(model, samples, config["paper"]["warmstart"], completed_epoch)
+        del samples
+    if compiler == "paper" and config["paper"]["warmstart"]["epochs"] and model.num_timesteps == 0:
+        callback.save("warmstart")
     if remaining:
         model.learn(total_timesteps=remaining, reset_num_timesteps=not resume, callback=callback)
     elif not (output / "final.zip").exists():
-        callback.init_callback(model)
         callback.save("final")
 
 

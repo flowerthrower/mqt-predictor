@@ -35,14 +35,18 @@ from qiskit import QuantumCircuit, QuantumRegister
 from qiskit.converters import circuit_to_dag
 from qiskit.quantum_info import Operator
 from qiskit.transpiler import Layout, PassManager, TransformationPass, TranspileLayout
-from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
+from qiskit.transpiler.passes import VF2PostLayout
+from qiskit.transpiler.preset_passmanagers import common, generate_preset_pass_manager
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 from mqt.predictor.reward import estimated_success_probability
 from mqt.predictor.rl.actions import bqskit_actions
+from mqt.predictor.rl.actions.base import CompilationOrigin, DeferredDeviceAction, PassType
 from mqt.predictor.rl.actions.qiskit_actions import run_qiskit_action
+from mqt.predictor.rl.actions.registry import get_actions_by_pass_type
 from mqt.predictor.rl.experiments.inputs import Inputs, load_target
 from mqt.predictor.rl.experiments.metrics import efficiency, observe
+from mqt.predictor.rl.experiments.qiskit_teacher import collect_demonstrations
 from mqt.predictor.rl.experiments.worker import (
     CompilerWorker,
     PassObserver,
@@ -263,8 +267,12 @@ def test_frozen_inputs(inputs: Inputs, config: dict[str, Any]) -> None:
 
 def test_distinct_methods_shared_actions(inputs: Inputs, config: dict[str, Any]) -> None:
     """Legacy observations stay discrete while paper observations include budget."""
+    registry = {kind: [action.name for action in actions] for kind, actions in get_actions_by_pass_type().items()}
     old = scasia.make_env("original", config, inputs)
     paper = scasia.make_env("paper", config, inputs)
+    assert registry == {
+        kind: [action.name for action in actions] for kind, actions in get_actions_by_pass_type().items()
+    }
     assert [action.name for action in old.action_set.values()] == [action.name for action in paper.action_set.values()]
     names = {action.name for action in paper.action_set.values()}
     assert names.isdisjoint({"QiskitO3", "MGDPass", "AIRouting", "AIRouting_opt"})
@@ -362,14 +370,20 @@ def test_standard_vf2_preserves_outputs(name: str, seed: int, inputs: Inputs, co
     env.valid_actions = env.determine_valid_actions_for_state()
     action = next(index for index, action in env.action_set.items() if action.name == "VF2PostLayout")
     assert env.action_masks()[action]
+    call_limit, max_trials = common.get_vf2_limits(3, None, None, exact_match=True)
+    standard = DeferredDeviceAction(
+        "VF2PostLayout",
+        CompilationOrigin.QISKIT,
+        PassType.FINAL_OPT,
+        lambda target: [VF2PostLayout(target=target, seed=-1, call_limit=call_limit, max_trials=max_trials)],
+    )
     expected, expected_layout = run_qiskit_action(
-        env.action_set[action],
+        standard,
         circuit,
         env.device,
         circuit.layout,
         input_qubit_count=original.num_qubits,
-        seed=int(np.random.default_rng(seed).integers(0, np.iinfo(np.int32).max)),
-        pass_timeout=config["worker"]["pass_timeout_seconds"],
+        seed=-1,
     )
     try:
         env.step(action)
@@ -399,6 +413,65 @@ def test_standard_vf2_preserves_outputs(name: str, seed: int, inputs: Inputs, co
                 [env.state.clbits[circuit.find_bit(bit).index] for bit in instruction.clbits],
             )
         assert circuit_to_dag(equivalent) == circuit_to_dag(env.state)
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("name", ["ghz_19", "bv_13", "qpeinexact_17", "ae_7", "qaoa_19"])
+def test_o3_teacher_replay(name: str, inputs: Inputs, config: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replay canonical actions, virtual permutations and repeated synthesis through the real worker."""
+    monkeypatch.setattr(inputs, "names", lambda split: [f"{split}/{name}_indep.qasm"])
+    env = scasia.make_env("paper", config, inputs)
+    try:
+        samples, report = collect_demonstrations(scasia.NormalizedGNNObservationWrapper(env), 0, 0.98)
+        assert len(report["circuits"]) == 1
+        assert report["transitions"] == len(samples) <= 32
+        assert report["circuits"][0]["actions"][-1] == "terminate"
+        assert samples[-1][3] == pytest.approx(report["circuits"][0]["esp"])
+        assert all(mask[action] for _, mask, action, _ in samples)
+        if name == "ae_7":
+            consolidated = next(trace for trace in env.trace if trace["name"] == "ConsolidateBlocks")
+            assert consolidated["after"]["gate_counts"]["unitary"]
+            assert consolidated["after"]["esp_kind"] == "unavailable"
+    finally:
+        env.close()
+
+
+def test_teacher_rejects_short_budget(inputs: Inputs, config: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never silently truncate a teacher demonstration to fit the learning budget."""
+    monkeypatch.setattr(inputs, "names", lambda split: [f"{split}/ghz_2_indep.qasm"])
+    config["experiment"]["episode_actions"] = 1
+    env = scasia.make_env("paper", config, inputs)
+    try:
+        with pytest.raises(ValueError, match="episode limit is 1"):
+            collect_demonstrations(scasia.NormalizedGNNObservationWrapper(env), 0, 0.98)
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("mapping", ["TrivialLayout", "TrivialPlacementPass"])
+def test_virtual_permutation_survives_mapping(mapping: str, inputs: Inputs, config: dict[str, Any]) -> None:
+    """Canonical virtual swaps retain their outputs through Qiskit and BQSKit mapping."""
+    env = scasia.make_env("paper", config, inputs)
+    circuit = QuantumCircuit(3)
+    circuit.x(0)
+    circuit.swap(0, 2)
+    circuit.cx(0, 1)
+    env.reset(circuit, seed=0)
+    try:
+        for name in ("ElidePermutations", "BasisTranslator", mapping):
+            action = next(index for index, item in env.action_set.items() if item.name == name)
+            assert env.action_masks()[action]
+            env.step(action)
+            assert env.last_result["status"] == "ok", env.last_result.get("error")
+        assert env.layout is not None
+        assert env.layout.final_index_layout() == [2, 1, 0]
+        compact = QuantumCircuit(3)
+        compact.global_phase = env.state.global_phase
+        for item in env.state:
+            compact.append(item.operation, [env.state.find_bit(qubit).index for qubit in item.qubits])
+        compact.swap(0, 2)
+        assert Operator(compact).equiv(Operator(circuit))
     finally:
         env.close()
 
@@ -700,18 +773,30 @@ def test_inaccurate_synthesis_fails_and_recovers(
 
 
 @pytest.mark.model_training
-@pytest.mark.parametrize("compiler", ["original", "paper"])
+@pytest.mark.parametrize(("compiler", "warmstart_epochs"), [("original", 0), ("paper", 0), ("paper", 2)])
 def test_training_save_load_resume(
-    compiler: str, inputs: Inputs, config: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    compiler: str,
+    warmstart_epochs: int,
+    inputs: Inputs,
+    config: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Interrupt after an updated checkpoint, resume, load and evaluate real policies."""
     config["experiment"].update(training_timesteps=4, episode_actions=2, checkpoint_steps=2, evaluation_repetitions=1)
     config["worker"]["pass_timeout_seconds"] = 3.0
     config["original"]["ppo"].update(n_steps=2, batch_size=2, n_epochs=1)
     config["paper"]["gnn"].update(n_steps=2, batch_size=2, n_epochs=1)
+    config["paper"]["warmstart"].update(epochs=warmstart_epochs, batch_size=2)
+    if warmstart_epochs:
+        config["experiment"]["episode_actions"] = 32
     monkeypatch.setattr(inputs, "names", lambda split: [f"{split}/{'ghz' if split == 'train' else 'bv'}_2_indep.qasm"])
     env = scasia.make_env(compiler, config, inputs)
-    manifest = {"identity": scasia.run_identity(config, inputs, env, compiler), "restarts": [], "checkpoints": {}}
+    manifest: dict[str, Any] = {
+        "identity": scasia.run_identity(config, inputs, env, compiler),
+        "restarts": [],
+        "checkpoints": {},
+    }
     on_start = scasia.RollingCheckpoint._on_rollout_start  # ruff: ignore[private-member-access]
 
     def interrupt_after_checkpoint(callback: scasia.RollingCheckpoint) -> None:
@@ -728,9 +813,14 @@ def test_training_save_load_resume(
         gc.collect()
         assert (tmp_path / "checkpoint.zip").is_file()
         assert manifest["actual_training_timesteps"] == 2
+        if warmstart_epochs:
+            assert (tmp_path / "warmstart.zip").is_file()
+            assert len(manifest["warmstart"]["epochs"]) == warmstart_epochs
         scasia.train(compiler, config, env, tmp_path, manifest, resume=True)
         gc.collect()
         assert manifest["actual_training_timesteps"] == 4
+        if warmstart_epochs:
+            assert len(manifest["warmstart"]["epochs"]) == warmstart_epochs
         assert manifest["restarts"][0]["timesteps"] == 2
         assert (tmp_path / "final.zip").is_file()
         scasia.evaluate(compiler, config, env, tmp_path, manifest, resume=False)
@@ -751,3 +841,42 @@ def test_training_save_load_resume(
         for checkpoint in tmp_path.glob("*.zip"):
             checkpoint.unlink()
         gc.collect()
+
+
+@pytest.mark.model_training
+def test_imitation_only_resume(
+    inputs: Inputs, config: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recover an interrupted imitation phase without counting its updates as PPO steps."""
+    config["experiment"].update(training_timesteps=0)
+    config["paper"]["warmstart"].update(epochs=10, batch_size=4)
+    monkeypatch.setattr(inputs, "names", lambda split: [f"{split}/ghz_2_indep.qasm"])
+    env = scasia.make_env("paper", config, inputs)
+    manifest: dict[str, Any] = {
+        "identity": scasia.run_identity(config, inputs, env, "paper"),
+        "restarts": [],
+        "checkpoints": {},
+    }
+    save = scasia.RollingCheckpoint.save
+
+    def interrupt_after_epoch(callback: scasia.RollingCheckpoint, name: str) -> None:
+        save(callback, name)
+        if name == "checkpoint" and callback.model.__dict__.get("scasia_warmstart_epochs") == 1:
+            msg = "imitation interruption"
+            raise InterruptedError(msg)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(scasia.RollingCheckpoint, "save", interrupt_after_epoch)
+            with pytest.raises(InterruptedError, match="imitation interruption"):
+                scasia.train("paper", config, env, tmp_path, manifest, resume=False)
+        scasia.train("paper", config, env, tmp_path, manifest, resume=True)
+        assert manifest["actual_training_timesteps"] == 0
+        assert [row["epoch"] for row in manifest["warmstart"]["epochs"]] == list(range(1, 11))
+        assert manifest["warmstart"]["epochs"][-1]["loss"] < manifest["warmstart"]["epochs"][0]["loss"]
+        assert manifest["checkpoints"]["warmstart"]["warmstart_epochs"] == 10
+        assert (tmp_path / "final.zip").is_file()
+    finally:
+        env.close()
+        for checkpoint in tmp_path.glob("*.zip"):
+            checkpoint.unlink()
