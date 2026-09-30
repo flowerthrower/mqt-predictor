@@ -38,11 +38,9 @@ directory; existing checkpoints cannot be resumed with this action set. The
 paper graph input also keeps normalized qubit count and depth instead of
 overwriting them with raw values. This input change requires fresh training too.
 
-The RL `VF2PostLayout` action tries one deterministic layout with an idle-time
-decay estimate included in its placement cost. It accepts the proposal only if
-ESP improves on the unchanged physical target. This is one VF2 invocation, with
-seed -1; it does not sample multiple compiled candidates. The worker still
-enforces the action's timeout. The native Qiskit and TKET baseline pipelines are
+The RL `VF2PostLayout` action uses the standard Qiskit pass on the unchanged
+physical target, with a seeded invocation. It has no custom placement cost or
+ESP acceptance check. The native Qiskit and TKET baseline pipelines are
 unchanged.
 
 `original.ppo` lists the legacy PPO settings, including gamma 0.98 and

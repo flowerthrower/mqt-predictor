@@ -127,7 +127,7 @@ def run_identity(config: dict[str, Any], inputs: Inputs, env: ExperimentEnv, com
         "evaluation_sampling": "seeded stochastic; every repetition retained; no best-of-N",
         "native_sdk_seeds": {
             "qiskit": "per-compilation seed",
-            "rl_vf2_postlayout": -1,
+            "rl_qiskit_actions": "seeded per action",
             "tket_lightsabre": 0,
             "bqskit_actions": 10,
         },

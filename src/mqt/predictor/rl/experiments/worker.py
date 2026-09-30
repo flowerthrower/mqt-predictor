@@ -17,11 +17,8 @@ import signal
 import subprocess
 import sys
 import time
-from copy import deepcopy
 from functools import partial
-from math import exp
 from pathlib import Path
-from statistics import fmean
 from typing import TYPE_CHECKING, Any, cast
 
 from bqskit.compiler import Compiler
@@ -29,15 +26,11 @@ from pytket.circuit import Qubit
 from pytket.extensions.qiskit import IBMQBackend, qiskit_to_tk, tk_to_qiskit
 from pytket.passes import BasePass as TketBasePass
 from qiskit.converters import dag_to_circuit
-from qiskit.transpiler import InstructionProperties, Layout, PassManager, TranspileLayout
+from qiskit.transpiler import Layout, TranspileLayout
 from qiskit.transpiler.basepasses import BasePass
-from qiskit.transpiler.passes import ASAPScheduleAnalysis, VF2PostLayout
 from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 
-from mqt.predictor.reward import estimated_success_probability
 from mqt.predictor.rl.actions import bqskit_actions
-from mqt.predictor.rl.actions.base import CompilationOrigin, DeferredDeviceAction, PassType
-from mqt.predictor.rl.actions.qiskit_actions import run_qiskit_action
 from mqt.predictor.rl.predictorenv import PredictorEnv
 
 from .environment import configure_actions
@@ -392,10 +385,7 @@ def _worker_main(connection: Connection, assets: Path, settings: dict[str, Any])
                 observer.physical = env.layout is not None
                 action = env.action_set[request["action"]]
                 entry = observer.begin(action.name, action.pass_type.value, circuit)
-                if action.name == "VF2PostLayout":
-                    result, env.layout = refine_layout(circuit, target, env.layout)
-                else:
-                    result = env.apply_action(request["action"])
+                result = env.apply_action(request["action"])
                 result._layout = env.layout  # ruff: ignore[private-member-access]
                 observer.physical = env.layout is not None
                 observer.end(entry, result)
@@ -419,55 +409,3 @@ def _worker_main(connection: Connection, assets: Path, settings: dict[str, Any])
             ))
         except Exception as error:  # ruff: ignore[blind-except]
             connection.send(("error", f"{type(error).__name__}: {error}"))
-
-
-def refine_layout(
-    circuit: QuantumCircuit, target: Target, layout: TranspileLayout | None
-) -> tuple[QuantumCircuit, TranspileLayout]:
-    """Try one deterministic coherence-aware VF2 layout; keep it only if exact ESP improves."""
-    assert layout is not None
-    schedule = PassManager(ASAPScheduleAnalysis(target=target))
-    schedule.run(circuit)
-    scale = target.dt if schedule.property_set["time_unit"] == "dt" else 1.0
-    assert scale is not None
-    busy: dict[int, float] = {}
-    ends: dict[int, float] = {}
-    for node, start in schedule.property_set["node_start_time"].items():
-        qubits = tuple(circuit.find_bit(qubit).index for qubit in node.qargs)
-        duration = 0.0 if node.name == "barrier" else target[node.name][qubits].duration
-        assert duration is not None
-        for qubit in qubits:
-            busy[qubit] = busy.get(qubit, 0.0) + duration
-            ends[qubit] = max(ends.get(qubit, 0.0), start * scale + duration)
-    if not busy:
-        return circuit, layout
-    idle = fmean(max(0.0, ends[qubit] - busy[qubit]) for qubit in busy)
-    surrogate = deepcopy(target)
-    assert target.qubit_properties is not None
-    for qubits, properties in target["measure"].items():
-        qubit = target.qubit_properties[qubits[0]]
-        assert qubit.t1 is not None
-        assert qubit.t2 is not None
-        surrogate.update_instruction_properties(
-            "measure",
-            qubits,
-            InstructionProperties(
-                duration=properties.duration,
-                error=1 - (1 - properties.error) * exp(-idle / min(qubit.t1, qubit.t2)),
-            ),
-        )
-    action = DeferredDeviceAction(
-        "VF2PostLayout", CompilationOrigin.QISKIT, PassType.FINAL_OPT, lambda _: [VF2PostLayout(target=surrogate)]
-    )
-    candidate, candidate_layout = run_qiskit_action(
-        action,
-        circuit,
-        target,
-        layout,
-        input_qubit_count=layout._input_qubit_count,  # ruff: ignore[private-member-access]
-        seed=-1,
-    )
-    assert candidate_layout is not None
-    if estimated_success_probability(candidate, target) > estimated_success_probability(circuit, target):
-        return candidate, candidate_layout
-    return circuit, layout

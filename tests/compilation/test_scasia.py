@@ -40,6 +40,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 
 from mqt.predictor.reward import estimated_success_probability
 from mqt.predictor.rl.actions import bqskit_actions
+from mqt.predictor.rl.actions.qiskit_actions import run_qiskit_action
 from mqt.predictor.rl.experiments.inputs import Inputs, load_target
 from mqt.predictor.rl.experiments.metrics import efficiency, observe
 from mqt.predictor.rl.experiments.worker import (
@@ -349,26 +350,35 @@ def test_native_optimizations_preserve_compilation(
         env.close()
 
 
-@pytest.mark.parametrize(("name", "seed", "improves"), [("ghz_19", 0, True), ("qpeinexact_17", 32, False)])
-def test_layout_refinement_preserves_outputs_and_improves_esp(
-    name: str, seed: int, improves: bool, inputs: Inputs, config: dict[str, Any]
-) -> None:
-    """Accept an ESP improvement, reject a worse proposal, and retain physical/output mappings."""
+@pytest.mark.parametrize(("name", "seed"), [("ghz_19", 0), ("qpeinexact_17", 32)])
+def test_standard_vf2_preserves_outputs(name: str, seed: int, inputs: Inputs, config: dict[str, Any]) -> None:
+    """Use the shared canonical VF2 action and retain physical/output mappings."""
     env = scasia.make_env("paper", config, inputs)
     original = inputs.circuit(f"train/{name}_indep.qasm")
     circuit = generate_preset_pass_manager(3, target=env.device, seed_transpiler=seed).run(original)
-    before = estimated_success_probability(circuit, env.device)
     env.reset(circuit, seed=seed)
     env.layout = circuit.layout
     env.num_qubits_uncompiled_circuit = original.num_qubits
     env.valid_actions = env.determine_valid_actions_for_state()
     action = next(index for index, action in env.action_set.items() if action.name == "VF2PostLayout")
     assert env.action_masks()[action]
+    expected, expected_layout = run_qiskit_action(
+        env.action_set[action],
+        circuit,
+        env.device,
+        circuit.layout,
+        input_qubit_count=original.num_qubits,
+        seed=int(np.random.default_rng(seed).integers(0, np.iinfo(np.int32).max)),
+        pass_timeout=config["worker"]["pass_timeout_seconds"],
+    )
     try:
         env.step(action)
         assert env.last_result["status"] == "ok"
         after = estimated_success_probability(env.state, env.device)
-        assert (after > before) if improves else (after == before)
+        assert circuit_to_dag(env.state) == circuit_to_dag(expected)
+        assert expected_layout is not None
+        assert env.layout is not None
+        assert env.layout.final_index_layout() == expected_layout.final_index_layout()
         assert env.trace[-1]["after"]["esp"] == after
         assert env.action_masks()[env.action_terminate_index]
         assert circuit.layout is not None
