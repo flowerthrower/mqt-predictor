@@ -16,6 +16,11 @@ iteration budget, pass `timesteps=iterations * gnn_config.n_steps`. SB3
 completes whole rollouts, so the actual step count may exceed the requested
 budget.
 
+GNN PPO disables dropout during updates to match rollout likelihoods. Configured
+dropout remains active for supervised fitting. The checkpoint tensor shapes and
+action indices are unchanged; SCASIA runs require a fresh output directory after
+this source change because their manifests enforce code identity.
+
 Prototype `.pt` checkpoints cannot be loaded because the action-output schema
 has changed. Retrain the GNN model to create an SB3 `.zip` checkpoint. The SB3
 trainer uses different advantage normalization, value clipping, KL stopping, and

@@ -224,10 +224,17 @@ def test_tket_noise_data_averages_gate_errors_separately_from_readout() -> None:
     assert readout_errors == {Node(0): 0.9, Node(1): 0.7}
 
 
-def test_tket_layout_and_routing_actions_are_masked_for_wide_operations(env: PredictorEnv) -> None:
-    """TKET layout and routing actions are unavailable for operations wider than two qubits."""
+@pytest.mark.parametrize("barrier", [False, True])
+def test_tket_layout_and_routing_actions_are_masked_for_wide_operations(env: PredictorEnv, barrier: bool) -> None:
+    """TKET rejects wide gates but supports barriers spanning more than two qubits."""
     circuit = QuantumCircuit(3)
-    circuit.ccx(0, 1, 2)
+    if barrier:
+        circuit.h(0)
+        circuit.cx(0, 1)
+        circuit.cx(1, 2)
+        circuit.barrier()
+    else:
+        circuit.ccx(0, 1, 2)
     env.reset(circuit)
     env.valid_actions = list(env.action_set)
 
@@ -240,8 +247,15 @@ def test_tket_layout_and_routing_actions_are_masked_for_wide_operations(env: Pre
     kak_index = next(index for index, action in env.action_set.items() if action.name == "KAKDecomposition")
 
     assert layout_and_routing_indices
-    assert not any(action_mask[index] for index in layout_and_routing_indices)
+    assert all(action_mask[index] == barrier for index in layout_and_routing_indices)
     assert action_mask[kak_index]
+
+    if barrier:
+        for name in ("GraphPlacement", "RoutingPass"):
+            action = next(index for index, action in env.action_set.items() if action.name == name)
+            env.state = env.apply_action(action)
+        assert env.layout is not None
+        assert env.is_circuit_routed(env.state, env.device.build_coupling_map())
 
 
 def test_synthesis_actions_produce_native_gates(

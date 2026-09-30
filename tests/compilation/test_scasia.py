@@ -358,6 +358,46 @@ def test_native_optimizations_preserve_compilation(
         env.close()
 
 
+@pytest.mark.parametrize("mode", ["original", "paper"])
+def test_tket_preserving_optimization_after_layout(mode: str, inputs: Inputs, config: dict[str, Any]) -> None:
+    """Paper mode can remove redundancies without changing physical wires or output permutations."""
+    env = scasia.make_env(mode, config, inputs)
+    circuit = QuantumCircuit(3)
+    circuit.x(0)
+    circuit.x(0)
+    circuit.cz(0, 1)
+    circuit.rz(0.2, 1)
+    circuit.rz(0.3, 1)
+    circuit.x(2)
+    env.reset(circuit, seed=0)
+    env.layout = TranspileLayout(
+        initial_layout=Layout({circuit.qubits[0]: 2, circuit.qubits[1]: 1, circuit.qubits[2]: 0}),
+        input_qubit_mapping={qubit: index for index, qubit in enumerate(circuit.qubits)},
+        final_layout=Layout({circuit.qubits[0]: 1, circuit.qubits[1]: 0, circuit.qubits[2]: 2}),
+        _output_qubit_list=circuit.qubits,
+        _input_qubit_count=3,
+    )
+    env.valid_actions = env.determine_valid_actions_for_state()
+    action = next(index for index, candidate in env.action_set.items() if candidate.name == "RemoveRedundancies")
+    assert env.action_masks()[action] == (mode == "paper")
+    try:
+        if mode == "original":
+            return
+        _, _, terminated, truncated, _ = env.step(action)
+        assert env.last_result["status"] == "ok"
+        assert not terminated
+        assert not truncated
+        assert env.state.count_ops() == {"cz": 1, "x": 1, "rz": 1}
+        assert Operator(env.state).equiv(Operator(circuit))
+        assert env.state.qubits == circuit.qubits
+        assert env.is_circuit_synthesized(env.state)
+        assert env.layout is not None
+        assert env.layout.final_index_layout() == [2, 0, 1]
+        assert env.action_masks()[env.action_terminate_index]
+    finally:
+        env.close()
+
+
 @pytest.mark.parametrize(("name", "seed"), [("ghz_19", 0), ("qpeinexact_17", 32)])
 def test_standard_vf2_preserves_outputs(name: str, seed: int, inputs: Inputs, config: dict[str, Any]) -> None:
     """Use the shared canonical VF2 action and retain physical/output mappings."""

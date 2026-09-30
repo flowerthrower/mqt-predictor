@@ -597,6 +597,26 @@ def test_clifford_optimization_collects_and_decomposes(wrapped: bool) -> None:
     assert Operator(optimized).equiv(Operator(circuit))
 
 
+@pytest.mark.parametrize("nonlocal_gate", [False, True])
+def test_routing_mask_ignores_barriers(nonlocal_gate: bool) -> None:
+    """A barrier between nonadjacent physical wires must not require routing."""
+    target = Target(num_qubits=3, description="bidirectional line")
+    target.add_instruction(
+        CXGate(),
+        {(a, b): InstructionProperties() for a, b in ((0, 1), (1, 0), (1, 2), (2, 1))},
+    )
+    env = predictorenv_module.PredictorEnv(device=target)
+    circuit = QuantumCircuit(3)
+    circuit.cx(0, 2 if nonlocal_gate else 1)
+    circuit.barrier(0, 2)
+    env.reset(circuit)
+    action = next(index for index, action in env.action_set.items() if action.name == "TrivialLayout")
+    env.state = env.apply_action(action)
+    env.valid_actions = env.determine_valid_actions_for_state()
+
+    assert env.action_masks()[env.action_terminate_index] == (not nonlocal_gate)
+
+
 def test_predictor_env_qiskit_routing_composes_final_layout() -> None:
     """Test that Qiskit routing composes an existing output permutation."""
     target = Target(num_qubits=3, description="bidirectional line")

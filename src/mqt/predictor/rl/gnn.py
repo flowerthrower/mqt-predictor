@@ -622,6 +622,17 @@ class GNNMaskableMultiInputActorCriticPolicy(MaskableMultiInputActorCriticPolicy
 class GNNMaskablePPO(MaskablePPO):
     """MaskablePPO variant that retains the encoder-to-policy learning-rate ratio."""
 
+    def train(self) -> None:
+        """Match rollout likelihoods during PPO while retaining dropout for supervised fitting."""
+        dropouts = {module: module.p for module in self.policy.modules() if isinstance(module, nn.Dropout)}
+        try:
+            for module in dropouts:
+                module.p = 0.0
+            super().train()
+        finally:
+            for module, probability in dropouts.items():
+                module.p = probability
+
     def collect_rollouts(
         self,
         env: VecEnv,

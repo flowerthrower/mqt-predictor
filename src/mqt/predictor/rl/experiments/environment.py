@@ -157,7 +157,7 @@ class ExperimentEnv(PredictorEnv):
         return observation, info
 
     def action_masks(self) -> list[bool]:
-        """Keep virtual permutation elimination before layout and native optimizers after layout."""
+        """Apply SDK preconditions and permit structure-preserving TKET optimizations in paper mode."""
         masks = super().action_masks()
         for index, action in self.action_set.items():
             if action.name == "ElidePermutations":
@@ -166,6 +166,8 @@ class ExperimentEnv(PredictorEnv):
                 masks[index] = masks[index] and self.layout is not None and self.is_circuit_synthesized(self.state)
             elif action.name == "VF2PostLayout_2q" and self.mode == "paper":
                 masks[index] = self._current_laid_out and self._current_routed
+            elif self.mode == "paper" and action.origin == CompilationOrigin.TKET:
+                masks[index] |= index in self.valid_actions and index in self.actions_structure_preserving_indices
         return masks
 
     def _get_stepwise_reward(self) -> tuple[float, str]:

@@ -52,6 +52,14 @@ can change later synthesis choices even when the rebuilt circuit is equivalent.
 Intermediate consolidated unitary blocks have unavailable proxy rewards; final
 scores still use the shared ESP calculation.
 
+The paper mask follows v3's compilation stages: broad optimization before
+layout, then optimizations that preserve layout, routing, and the native gate
+set. Termination requires all three properties. This deliberately excludes some
+optimization-and-repair sequences. SDK preconditions further restrict available
+passes. Barriers do not count as multi-qubit gates or routing interactions.
+Fully preserving TKET optimizations, currently `RemoveRedundancies`, remain
+available after layout in paper mode; original mode retains its legacy filter.
+
 The RL `VF2PostLayout` action uses the standard Qiskit pass on the unchanged
 physical target, with the SDK's seed. It has no custom placement cost or ESP
 acceptance check. The native Qiskit and TKET baseline pipelines are unchanged.
@@ -81,6 +89,12 @@ native pass count, and runtime. The manifest records imitation losses, training
 action accuracy, and separate demonstration/fit costs. Imitation is additional
 training work; its transitions are not counted as PPO timesteps. The five-epoch
 default is an initial setting, not a claim that the learned policy matches O3.
+
+Configured dropout applies during imitation. PPO disables dropout during both
+rollout collection and updates so unchanged weights produce the same action
+likelihoods. The KL guard remains active for actual policy changes. Runs
+predating this correction need a fresh output directory because resume checks
+source identity.
 
 Use separate TOML files and output roots for these ablations:
 

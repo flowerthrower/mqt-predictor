@@ -58,6 +58,10 @@ releases may include breaking changes.
 
 ### Fixed
 
+- 🐛 Keep GNN PPO likelihoods consistent across rollouts and updates, ignore
+  barriers in action masks, and permit preserving TKET optimizations after
+  layout in the SCASIA paper experiment ([SCASIA experiments])
+  ([**@flowerthrower**])
 - 🐛 Score complete RL compilations at the hard pass horizon and terminate
   failed attempts without value bootstrapping. Include the remaining pass budget
   in flat and GNN observations ([#830]) ([**@flowerthrower**])
@@ -168,6 +172,7 @@ for previous changelogs._
 
 <!-- General links -->
 
+[SCASIA experiments]: https://github.com/flowerthrower/mqt-predictor/tree/scasia-experiments
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 [Common Changelog]: https://common-changelog.org
 [Semantic Versioning]: https://semver.org/spec/v2.0.0.html

@@ -683,7 +683,9 @@ class PredictorEnv(Env):
             A dense boolean mask ordered like ``self.action_set``.
         """
         has_layout = self.layout is not None
-        has_wide_operations = any(len(instruction.qubits) > 2 for instruction in self.state.data)
+        has_wide_operations = any(
+            len(instruction.qubits) > 2 and instruction.operation.name != "barrier" for instruction in self.state.data
+        )
         valid_action_indices = set(self.valid_actions)
         action_mask: list[bool] = []
 
@@ -818,7 +820,7 @@ class PredictorEnv(Env):
         """
         directed_edges = set(coupling_map.get_edges())
         for instr in circuit.data:
-            if len(instr.qubits) == 2:
+            if len(instr.qubits) == 2 and instr.operation.name != "barrier":
                 q0 = circuit.find_bit(instr.qubits[0]).index
                 q1 = circuit.find_bit(instr.qubits[1]).index
                 if (q0, q1) not in directed_edges:

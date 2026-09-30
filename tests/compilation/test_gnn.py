@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from importlib import import_module
 from typing import TYPE_CHECKING, cast
 
@@ -27,11 +28,13 @@ from mqt.predictor.rl import predictor as predictor_module
 from mqt.predictor.rl.helper import create_feature_dict
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
     from pathlib import Path
 
     from mqt.predictor.rl.gnn import (
         GNNFeaturesExtractor,
         GNNMaskableDictRolloutBuffer,
+        GNNMaskableDictRolloutBufferSamples,
         GNNMaskableMultiInputActorCriticPolicy,
         GraphBatch,
     )
@@ -177,6 +180,53 @@ def test_gnn_masked_training_and_saved_inference(
     compiled_dag = circuit_to_dag(compiled)
     compiled_dag.remove_qubits(*compiled.qubits[circuit.num_qubits :])
     assert Operator(dag_to_circuit(compiled_dag)).equiv(Operator(circuit))
+
+
+def test_ppo_likelihoods_match_rollout_before_update(
+    gnn_predictor: Predictor, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PPO must compare the same policy before its first update, even with configured dropout."""
+    env = gnn_predictor.env
+    monkeypatch.setattr(
+        env,
+        "action_masks",
+        lambda: [
+            action.name in {"CommutativeCancellation", "InverseCancellation"} for action in env.action_set.values()
+        ],
+    )
+    assert gnn_predictor.gnn_config is not None
+    model = gnn.create_gnn_model(
+        gnn.GNNObservationWrapper(env),
+        replace(gnn_predictor.gnn_config, dropout_p=0.1),
+        verbose=0,
+        tensorboard_log=str(tmp_path),
+        seed=7,
+    )
+    buffer = cast("GNNMaskableDictRolloutBuffer", model.rollout_buffer)
+    get = buffer.get
+    checked = False
+
+    def check_first_batch(batch_size: int | None = None) -> Generator[GNNMaskableDictRolloutBufferSamples, None, None]:
+        nonlocal checked
+        for batch in get(batch_size):
+            if not checked:
+                _, log_prob, _ = model.policy.evaluate_actions(
+                    batch.observations,  # ty: ignore[invalid-argument-type] -- GNN policy accepts graph batches.
+                    batch.actions.long().flatten(),
+                    action_masks=batch.action_masks,
+                )
+                torch.testing.assert_close(log_prob, batch.old_log_prob, rtol=0, atol=1e-6)
+                checked = True
+            yield batch
+
+    monkeypatch.setattr(buffer, "get", check_first_batch)
+    before = [parameter.detach().clone() for parameter in model.policy.parameters()]
+    model.learn(total_timesteps=4)
+    assert checked
+    assert any(not torch.equal(old, new) for old, new in zip(before, model.policy.parameters(), strict=True))
+    assert all(
+        module.p == pytest.approx(0.1) for module in model.policy.modules() if isinstance(module, torch.nn.Dropout)
+    )
 
 
 @pytest.mark.parametrize("ending", ["terminate", "failure", "horizon", "truncation"])
