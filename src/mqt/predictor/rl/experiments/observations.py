@@ -45,12 +45,13 @@ class NormalizedGNNObservationWrapper(GNNObservationWrapper):
 class PreviousActionObservationWrapper(NormalizedGNNObservationWrapper):
     """Append the previous action's one-hot vector, or all zeros after reset."""
 
-    def __init__(self, env: ExperimentEnv) -> None:
+    def __init__(self, env: ExperimentEnv, *, quality_features: bool = False) -> None:
         """Use the experiment's ordered action registry for the context vector."""
         super().__init__(env)
         self.action_count = int(cast("spaces.Discrete", env.action_space).n)
         assert list(env.action_set) == list(range(self.action_count))
         self.previous_action: int | None = None
+        self.quality_features = quality_features
 
     def reset(
         self,
@@ -73,22 +74,38 @@ class PreviousActionObservationWrapper(NormalizedGNNObservationWrapper):
         extra = features.new_zeros((1, self.action_count))
         if self.previous_action is not None:
             extra[0, self.previous_action] = 1
-        cast("Any", self.graph_observation).global_features = torch.cat((features, extra), dim=1)
+        features = torch.cat((features, extra), dim=1)
+        if self.quality_features:
+            score = cast("ExperimentEnv", self.env.unwrapped).last_result.get("score", {})
+            available = score.get("esp_kind") == "exact" and score.get("esp") is not None
+            quality = features.new_tensor([[score["esp"] if available else 0.0, float(available)]])
+            features = torch.cat((features, quality), dim=1)
+        cast("Any", self.graph_observation).global_features = features
 
 
 class PreviousActionInputLayer(nn.Module):
     """Keep the original matrix operation and add a zero-initialized action contribution."""
 
-    def __init__(self, original: nn.Linear, action_count: int) -> None:
+    def __init__(self, original: nn.Linear, action_count: int, *, quality_features: bool = False) -> None:
         """Keep the existing layer and add the previous-action weights."""
         super().__init__()
         self.original = original
         self.previous_action = nn.Linear(action_count, original.out_features, bias=False)
         nn.init.zeros_(self.previous_action.weight)
+        self.quality = nn.Linear(2, original.out_features, bias=False) if quality_features else None
+        if self.quality is not None:
+            nn.init.zeros_(self.quality.weight)
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         """Add the previous-action contribution to the original layer output."""
         width = self.previous_action.in_features
+        if self.quality is not None:
+            original = features[:, :-2]
+            return (
+                self.original(original[:, :-width])
+                + self.previous_action(original[:, -width:])
+                + self.quality(features[:, -2:])
+            )
         return self.original(features[:, :-width]) + self.previous_action(features[:, -width:])
 
 
@@ -105,6 +122,7 @@ class PreviousActionFeaturesExtractor(GNNFeaturesExtractor):
         *,
         bidirectional: bool = True,
         action_count: int,
+        quality_features: bool = False,
     ) -> None:
         """Extend the first shared layer without changing the graph encoder."""
         super().__init__(
@@ -116,7 +134,10 @@ class PreviousActionFeaturesExtractor(GNNFeaturesExtractor):
             bidirectional=bidirectional,
         )
         self.action_count = action_count
-        self.trunk[0] = PreviousActionInputLayer(cast("nn.Linear", self.trunk[0]), action_count)
+        self.quality_features = quality_features
+        self.trunk[0] = PreviousActionInputLayer(
+            cast("nn.Linear", self.trunk[0]), action_count, quality_features=quality_features
+        )
 
     def forward(self, observations: GraphBatch) -> torch.Tensor:
         """Extract shared actor and critic features, including the previous action."""
@@ -130,7 +151,8 @@ class PreviousActionFeaturesExtractor(GNNFeaturesExtractor):
             observations.batch,
             observations.num_graphs,
         )
-        global_features = observations["global_features"].reshape(-1, GLOBAL_FEATURE_DIM + self.action_count)
+        width = GLOBAL_FEATURE_DIM + self.action_count + (2 if self.quality_features else 0)
+        global_features = observations["global_features"].reshape(-1, width)
         return self.trunk(torch.cat((embedding, global_features), dim=1))
 
 
@@ -162,3 +184,19 @@ def add_previous_action_inputs(model: GNNMaskablePPO, action_count: int) -> Prev
     policy.optimizer.param_groups[0]["params"] = encoder_parameters
     policy.optimizer.param_groups[1]["params"] = [p for p in policy.parameters() if id(p) not in encoder_ids]
     return new
+
+
+def add_quality_inputs(model: GNNMaskablePPO) -> None:
+    """Add zero-initialized ESP inputs without changing pretrained outputs or Adam state."""
+    policy = model.policy
+    extractor = cast("PreviousActionFeaturesExtractor", policy.features_extractor)
+    layer = cast("PreviousActionInputLayer", extractor.trunk[0])
+    assert layer.quality is None
+    with torch.random.fork_rng(devices=[]):
+        layer.quality = nn.Linear(2, layer.original.out_features, bias=False).to(model.device)
+    nn.init.zeros_(layer.quality.weight)
+    extractor.quality_features = True
+    policy.features_extractor_kwargs["quality_features"] = True
+    model.policy_kwargs["features_extractor_kwargs"]["quality_features"] = True
+    encoder_ids = {id(parameter) for parameter in extractor.encoder.parameters()}
+    policy.optimizer.param_groups[1]["params"] = [p for p in policy.parameters() if id(p) not in encoder_ids]

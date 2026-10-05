@@ -8,6 +8,12 @@ of changes including minor and patch releases, please refer to the
 
 ### SCASIA experiment runs
 
+Pretrained runs can enable `[paper.refinement]` for exact ESP observations,
+action costs, and a frozen-policy KL penalty. All three are disabled when the
+section is absent. Start a fresh output directory when changing these settings;
+keep existing runs on their recorded revision. The reference policy remains the
+bundled pretrained checkpoint when resuming a refined run.
+
 Use `experiments/scasia-pretrained.toml` to start a new PPO run from the bundled
 20-epoch GNN. It imports weights and optimizer state into
 `gnn-pretrained-v4/paper`, adds previous-action observations and skips teacher

@@ -12,6 +12,9 @@ releases may include breaking changes.
 
 ### Added
 
+- ✨ Add opt-in exact ESP observations, per-action costs, and a frozen-policy KL
+  penalty for pretrained SCASIA PPO runs ([SCASIA experiments])
+  ([**@flowerthrower**])
 - ✨ Continue SCASIA PPO from the bundled pretrained GNN with previous-action
   observations and verified checkpoint provenance ([SCASIA experiments])
   ([**@flowerthrower**])
@@ -65,6 +68,8 @@ releases may include breaking changes.
 
 ### Fixed
 
+- 🐛 Preserve SCASIA logical wire order and virtual permutations across SDK
+  conversions ([SCASIA experiments]) ([**@flowerthrower**])
 - 🐛 Ignore barriers when scoring SCASIA routing validity ([SCASIA experiments])
   ([**@flowerthrower**])
 - 🐛 Keep GNN PPO likelihoods consistent across rollouts and updates, ignore

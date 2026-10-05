@@ -133,6 +133,7 @@ class ExperimentEnv(PredictorEnv):
         self.qiskit_properties: dict[str, Any] = {}
         self.no_effect_actions: set[int] = set()
         self.episode = 0
+        self.action_cost = settings.get("action_cost", 0.0) if mode == "paper" else 0.0
 
     def reset(
         self,
@@ -173,6 +174,13 @@ class ExperimentEnv(PredictorEnv):
             if self.mode == "paper" and index in self.no_effect_actions:
                 masks[index] = False
         return masks
+
+    def step(self, action: int) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
+        """Charge the configured experiment cost for each non-termination action."""
+        observation, reward, terminated, truncated, info = super().step(action)
+        if action != self.action_terminate_index:
+            reward -= self.action_cost
+        return observation, reward, terminated, truncated, info
 
     def _get_stepwise_reward(self) -> tuple[float, str]:
         """The existing basis-translation proxy cannot score consolidated unitary blocks."""

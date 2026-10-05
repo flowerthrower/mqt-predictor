@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     from qiskit.dagcircuit import DAGCircuit
 
     from mqt.predictor.rl.experiments.environment import ExperimentEnv
+    from mqt.predictor.rl.gnn import GNNMaskableMultiInputActorCriticPolicy
 
 pytest.importorskip("torch_geometric")
 scasia = import_module("mqt.predictor.rl.experiments.scasia")
@@ -641,16 +642,19 @@ def test_teacher_rejects_short_budget(inputs: Inputs, config: dict[str, Any], mo
 
 
 @pytest.mark.parametrize("mapping", ["TrivialLayout", "TrivialPlacementPass"])
-def test_virtual_permutation_survives_mapping(mapping: str, inputs: Inputs, config: dict[str, Any]) -> None:
+@pytest.mark.parametrize("preparation", [("BasisTranslator",), ("CliffordSimp", "BasisTranslator"), ("BlockZXZPass",)])
+def test_virtual_permutation_survives_mapping(
+    mapping: str, preparation: tuple[str, ...], inputs: Inputs, config: dict[str, Any]
+) -> None:
     """Canonical virtual swaps retain their outputs through Qiskit and BQSKit mapping."""
     env = scasia.make_env("paper", config, inputs)
-    circuit = QuantumCircuit(3)
+    circuit = QuantumCircuit(QuantumRegister(1, "b"), QuantumRegister(2, "a"))
     circuit.x(0)
     circuit.swap(0, 2)
     circuit.cx(0, 1)
     env.reset(circuit, seed=0)
     try:
-        for name in ("ElidePermutations", "BasisTranslator", mapping):
+        for name in ("ElidePermutations", *preparation, mapping):
             action = next(index for index, item in env.action_set.items() if item.name == name)
             assert env.action_masks()[action]
             env.step(action)
@@ -668,8 +672,12 @@ def test_virtual_permutation_survives_mapping(mapping: str, inputs: Inputs, conf
 
 
 @pytest.mark.parametrize("mode", ["original", "paper"])
-def test_episode_boundary(mode: str, inputs: Inputs, config: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("action_cost", [0.0, 0.0001])
+def test_episode_boundary(
+    mode: str, action_cost: float, inputs: Inputs, config: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """At action 32, legacy bootstraps with zero reward; paper terminates with ESP."""
+    config["paper"]["refinement"] = {"action_cost": action_cost}
     env = ready_env(mode, inputs, config)
     monkeypatch.setattr(env, "apply_action", lambda _: env.state)
     monkeypatch.setattr(env, "calculate_reward", lambda: 0.7)
@@ -678,7 +686,7 @@ def test_episode_boundary(mode: str, inputs: Inputs, config: dict[str, Any], mon
     assert env.num_steps == 32
     assert terminated is (mode == "paper")
     assert truncated is (mode == "original")
-    assert reward == pytest.approx(0.7 if mode == "paper" else 0.0)
+    assert reward == pytest.approx(0.7 - action_cost if mode == "paper" else 0.0)
 
 
 @pytest.mark.parametrize("mode", ["original", "paper"])
@@ -695,10 +703,17 @@ def test_explicit_termination(
 
 @pytest.mark.parametrize("mode", ["original", "paper"])
 @pytest.mark.parametrize("failure", [RuntimeError, TimeoutError])
+@pytest.mark.parametrize("action_cost", [0.0, 0.0001])
 def test_terminal_failures(
-    mode: str, failure: type[Exception], inputs: Inputs, config: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    mode: str,
+    failure: type[Exception],
+    action_cost: float,
+    inputs: Inputs,
+    config: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Failed and timed-out passes do not bootstrap in either method."""
+    config["paper"]["refinement"] = {"action_cost": action_cost}
     env = ready_env(mode, inputs, config)
 
     def fail(_: int) -> None:
@@ -707,7 +722,9 @@ def test_terminal_failures(
 
     monkeypatch.setattr(env, "apply_action", fail)
     _, reward, terminated, truncated, info = env.step(env.actions_opt_indices[0])
-    assert (reward, terminated, truncated) == (0.0 if mode == "original" else -0.001, True, False)
+    assert reward == pytest.approx(0.0 if mode == "original" else -0.001 - action_cost)
+    assert terminated
+    assert not truncated
     assert info["termination_reason"] == "pass_error"
 
 
@@ -983,13 +1000,20 @@ def test_inaccurate_synthesis_fails_and_recovers(
 
 @pytest.mark.model_training
 @pytest.mark.parametrize(
-    ("compiler", "warmstart_epochs", "pretrained"),
-    [("original", 0, False), ("paper", 0, False), ("paper", 2, False), ("paper", 0, True)],
+    ("compiler", "warmstart_epochs", "pretrained", "refined"),
+    [
+        ("original", 0, False, False),
+        ("paper", 0, False, False),
+        ("paper", 2, False, False),
+        ("paper", 0, True, False),
+        ("paper", 0, True, True),
+    ],
 )
 def test_training_save_load_resume(
     compiler: str,
     warmstart_epochs: int,
     pretrained: bool,
+    refined: bool,
     inputs: Inputs,
     config: dict[str, Any],
     tmp_path: Path,
@@ -1005,6 +1029,12 @@ def test_training_save_load_resume(
         config["experiment"]["episode_actions"] = 32
     if pretrained:
         config["paper"]["warmstart"]["checkpoint"] = str(ROOT / "experiments/assets/gnn-context20.zip")
+        if refined:
+            config["paper"]["refinement"] = {
+                "quality_features": True,
+                "action_cost": 0.0001,
+                "teacher_kl_coefficient": 0.02,
+            }
 
         def reject_teacher(*_args: object, **_kwargs: object) -> None:
             pytest.fail("Pretrained runs must not replay the teacher.")
@@ -1065,6 +1095,77 @@ def test_training_save_load_resume(
         for checkpoint in tmp_path.glob("*.zip"):
             checkpoint.unlink()
         gc.collect()
+
+
+def test_refinement_observations_rewards_and_teacher(inputs: Inputs, config: dict[str, Any], tmp_path: Path) -> None:
+    """Expose exact ESP, preserve the initial policy, and penalize teacher drift."""
+    config["paper"]["warmstart"].update(checkpoint=str(ROOT / "experiments/assets/gnn-context20.zip"), epochs=0)
+    config["paper"]["refinement"] = {"quality_features": True, "action_cost": 0.0001, "teacher_kl_coefficient": 0.02}
+    env = scasia.make_env("paper", config, inputs)
+    wrapped = scasia.PreviousActionObservationWrapper(env, quality_features=True)
+    model = scasia.create_gnn_model(
+        wrapped, scasia.GNNConfig(**config["paper"]["gnn"]), verbose=0, tensorboard_log=str(tmp_path), seed=0
+    )
+    manifest = {"identity": scasia.run_identity(config, inputs, env, "paper")}
+    try:
+        scasia.import_pretrained(model, config, env, manifest)
+        wrapped.reset(inputs.circuit("train/ghz_2_indep.qasm"), seed=0)
+        graph = wrapped.graph_observation
+        assert graph["global_features"].shape == (1, 84)
+        assert graph["global_features"][0, -2:].tolist() == [0.0, 0.0]
+        old_graph = cast("Any", graph).clone()
+        old_graph.global_features = old_graph.global_features[:, :-2]
+        masks = np.asarray(env.action_masks())
+        policy = cast("GNNMaskableMultiInputActorCriticPolicy", model.policy)
+        policy.set_training_mode(False)
+        actions = torch.arange(len(env.action_set))
+        with torch.no_grad():
+            old_obs, _ = policy.obs_to_tensor(old_graph)
+            old_log_probs = policy.get_distribution(old_obs, action_masks=masks).log_prob(actions)
+        rng_state = torch.get_rng_state()
+        scasia.add_quality_inputs(model)
+        assert torch.equal(torch.get_rng_state(), rng_state)
+        with torch.no_grad():
+            obs, _ = policy.obs_to_tensor(graph)
+            log_probs = policy.get_distribution(obs, action_masks=masks).log_prob(actions)
+        torch.testing.assert_close(log_probs, old_log_probs, rtol=0, atol=0)
+
+        penalty = scasia.TeacherPenalty(config["paper"]["warmstart"]["checkpoint"], 0.02)
+        penalty.init_callback(model)
+        assert all(not parameter.requires_grad for parameter in penalty.teacher.parameters())
+        action = int(np.flatnonzero(masks)[0])
+        with torch.no_grad():
+            reference = penalty.teacher.get_distribution(old_obs, action_masks=masks).log_prob(torch.tensor([action]))
+            cast("torch.nn.Linear", policy.action_net).bias[action] += 30
+            current = policy.get_distribution(obs, action_masks=masks).log_prob(torch.tensor([action]))
+        rewards = np.array([0.5], dtype=np.float32)
+        penalty.update_locals({
+            "graph_observations": [graph],
+            "action_masks": masks.reshape(1, -1),
+            "actions": np.array([[action]]),
+            "log_probs": current,
+            "rewards": rewards,
+        })
+        assert penalty.on_step()
+        assert rewards[0] == pytest.approx(0.5 - 0.02 * (current - reference).item())
+        assert graph["global_features"].shape == (1, 84)
+
+        for name in ("VF2Layout", "BasisTranslator"):
+            index = next(i for i, candidate in env.action_set.items() if candidate.name == name)
+            _, reward, terminated, truncated, _ = wrapped.step(index)
+            assert reward == pytest.approx(-0.0001)
+            assert not terminated
+            assert not truncated
+        score = env.last_result["score"]["esp"]
+        assert wrapped.graph_observation["global_features"][0, -2:].tolist() == pytest.approx([score, 1.0])
+        _, reward, terminated, truncated, _ = wrapped.step(env.action_terminate_index)
+        assert reward == score
+        assert terminated
+        assert not truncated
+        wrapped.reset(inputs.circuit("train/ghz_2_indep.qasm"), seed=0)
+        assert wrapped.graph_observation["global_features"][0, -2:].tolist() == [0.0, 0.0]
+    finally:
+        wrapped.close()
 
 
 def test_pretrained_import_preserves_parameters_and_fresh_schedule(

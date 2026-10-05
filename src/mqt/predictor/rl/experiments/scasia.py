@@ -34,8 +34,14 @@ from mqt.predictor.rl.gnn import GNNConfig, GNNMaskablePPO, GNNObservationWrappe
 from .environment import ExperimentEnv, OriginalEnv
 from .inputs import Inputs, digest, load_target
 from .metrics import efficiency, observe
-from .observations import NormalizedGNNObservationWrapper, PreviousActionObservationWrapper, add_previous_action_inputs
+from .observations import (
+    NormalizedGNNObservationWrapper,
+    PreviousActionObservationWrapper,
+    add_previous_action_inputs,
+    add_quality_inputs,
+)
 from .qiskit_teacher import collect_demonstrations, fit_demonstrations
+from .refinement import TeacherPenalty
 from .worker import CompilerWorker
 
 if TYPE_CHECKING:
@@ -55,6 +61,14 @@ def resolve_config(path: Path) -> dict[str, Any]:
     config["assets"] = str((path.parent / config["assets"]).resolve())
     config["output"] = str((path.parent / config["output"]).resolve())
     checkpoint = config["paper"]["warmstart"].get("checkpoint")
+    refinement = config["paper"].get("refinement", {})
+    if refinement and not checkpoint:
+        msg = "Paper refinement requires a pretrained warmstart.checkpoint."
+        raise ValueError(msg)
+    for key in ("action_cost", "teacher_kl_coefficient"):
+        value = refinement.get(key, 0.0)
+        if not np.isfinite(value) or value < 0:
+            raise ValueError(key)
     if checkpoint:
         config["paper"]["warmstart"]["checkpoint"] = str((path.parent / checkpoint).resolve())
         if config["paper"]["warmstart"]["epochs"]:
@@ -103,7 +117,11 @@ def make_env(compiler: str, config: dict[str, Any], inputs: Inputs) -> Experimen
     _, target = load_target(inputs.path)
     worker = CompilerWorker(inputs.path, worker_settings(config, compiler))
     cls = OriginalEnv if compiler == "original" else ExperimentEnv
-    return cls(target, inputs, worker, config["experiment"], compiler)
+    settings = {
+        **config["experiment"],
+        "action_cost": config["paper"].get("refinement", {}).get("action_cost", 0.0),
+    }
+    return cls(target, inputs, worker, settings, compiler)
 
 
 def run_identity(config: dict[str, Any], inputs: Inputs, env: ExperimentEnv, compiler: str) -> dict[str, Any]:
@@ -239,8 +257,11 @@ def train(
     ):
         msg = "Zero PPO steps require a paper behavior-cloning run"
         raise ValueError(msg)
-    wrapper = PreviousActionObservationWrapper if pretrained else NormalizedGNNObservationWrapper
-    wrapped = wrapper(env) if compiler == "paper" else env
+    refinement = config["paper"].get("refinement", {})
+    if pretrained:
+        wrapped = PreviousActionObservationWrapper(env, quality_features=refinement.get("quality_features", False))
+    else:
+        wrapped = NormalizedGNNObservationWrapper(env) if compiler == "paper" else env
     model_class = GNNMaskablePPO if compiler == "paper" else MaskablePPO
     identity = digest(json.dumps(manifest["identity"], sort_keys=True).encode())
     if resume:
@@ -265,6 +286,8 @@ def train(
         )
         if pretrained:
             import_pretrained(model, config, env, manifest)
+            if refinement.get("quality_features", False):
+                add_quality_inputs(model)
     else:
         model = MaskablePPO(
             "MultiInputPolicy",
@@ -321,7 +344,12 @@ def train(
     if compiler == "paper" and config["paper"]["warmstart"]["epochs"] and model.num_timesteps == 0:
         callback.save("warmstart")
     if remaining:
-        model.learn(total_timesteps=remaining, reset_num_timesteps=not resume, callback=callback)
+        callbacks: list[BaseCallback] = [callback]
+        if pretrained and refinement.get("teacher_kl_coefficient", 0.0):
+            callbacks.append(
+                TeacherPenalty(config["paper"]["warmstart"]["checkpoint"], refinement["teacher_kl_coefficient"])
+            )
+        model.learn(total_timesteps=remaining, reset_num_timesteps=not resume, callback=callbacks)
     elif not (output / "final.zip").exists():
         callback.save("final")
 
@@ -333,8 +361,12 @@ def evaluate(
     settings = config["experiment"]
     model = None
     pretrained = compiler == "paper" and bool(config["paper"]["warmstart"].get("checkpoint"))
-    wrapper = PreviousActionObservationWrapper if pretrained else NormalizedGNNObservationWrapper
-    wrapped = wrapper(env) if compiler == "paper" else env
+    if pretrained:
+        wrapped = PreviousActionObservationWrapper(
+            env, quality_features=config["paper"].get("refinement", {}).get("quality_features", False)
+        )
+    else:
+        wrapped = NormalizedGNNObservationWrapper(env) if compiler == "paper" else env
     if compiler in {"original", "paper"}:
         cls = GNNMaskablePPO if compiler == "paper" else MaskablePPO
         model = cls.load(output / "final.zip")

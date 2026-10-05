@@ -25,6 +25,7 @@ from bqskit.compiler import Compiler
 from pytket.circuit import Qubit
 from pytket.extensions.qiskit import IBMQBackend, qiskit_to_tk, tk_to_qiskit
 from pytket.passes import BasePass as TketBasePass
+from qiskit import QuantumCircuit
 from qiskit.converters import circuit_to_dag, dag_to_circuit
 from qiskit.passmanager import PropertySet
 from qiskit.transpiler import Layout, TranspileLayout
@@ -32,6 +33,7 @@ from qiskit.transpiler.basepasses import BasePass
 from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 
 from mqt.predictor.rl.actions import bqskit_actions
+from mqt.predictor.rl.actions.base import CompilationOrigin, PassType
 from mqt.predictor.rl.predictorenv import PredictorEnv
 
 from .environment import configure_actions
@@ -45,7 +47,6 @@ if TYPE_CHECKING:
 
     from pytket import Circuit
     from pytket.predicates import CompilationUnit
-    from qiskit import QuantumCircuit
     from qiskit.dagcircuit import DAGCircuit
     from qiskit.passmanager import PassManagerState
     from qiskit.transpiler import Target
@@ -414,6 +415,14 @@ def _worker_main(connection: Connection, assets: Path, settings: dict[str, Any])
                     )
                 else:
                     qiskit_dag = None
+                    if (
+                        env.layout is None
+                        and action.origin == CompilationOrigin.TKET
+                        and action.pass_type == PassType.OPT
+                    ):
+                        # TKET sorts named registers; canonical input wires preserve the logical order.
+                        env.state = QuantumCircuit(circuit.num_qubits, circuit.num_clbits)
+                        env.state.compose(circuit, inplace=True)
                     result = env.apply_action(request["action"])
                     if env.layout is not None:
                         permutation = (
@@ -425,6 +434,16 @@ def _worker_main(connection: Connection, assets: Path, settings: dict[str, Any])
                             env.layout = TranspileLayout.from_property_set(
                                 circuit_to_dag(result), PropertySet(properties)
                             )
+                    elif circuit.qubits != result.qubits:
+                        qubits = dict(zip(circuit.qubits, result.qubits, strict=True))
+                        properties["original_qubit_indices"] = {
+                            qubits[qubit]: index for qubit, index in properties["original_qubit_indices"].items()
+                        }
+                        for key in ("original_layout", "virtual_permutation_layout"):
+                            if key in properties:
+                                properties[key] = Layout({
+                                    qubits[qubit]: index for qubit, index in properties[key].get_virtual_bits().items()
+                                })
                 extra["qiskit_properties"] = properties
                 result._layout = env.layout  # ruff: ignore[private-member-access]
                 observer.physical = env.layout is not None

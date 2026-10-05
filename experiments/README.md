@@ -60,6 +60,50 @@ and three repetitions, versus Qiskit's 79.37%. These circuits were already
 inspected during prototype development; this is not a held-out claim or evidence
 that PPO preserves the result.
 
+### PPO refinement
+
+Pretrained runs accept these optional settings:
+
+```toml
+[paper.refinement]
+quality_features = true
+action_cost = 0.0001
+teacher_kl_coefficient = 0.1
+```
+
+`quality_features` appends current exact ESP and an availability flag. Both are
+zero before exact scoring is possible. The new input weights start at zero,
+preserving the imported policy. This uses the worker's existing score and does
+not add compilation or expose the full device calibration to the graph.
+
+`action_cost` subtracts the configured amount for each non-termination action,
+including failures and the action that reaches the cap. Explicit termination
+still earns final ESP. One saved pass is worth 0.01 ESP percentage points at the
+value above. Original-mode rewards and all pass implementations stay the same.
+
+`teacher_kl_coefficient` subtracts `beta * (log pi(a|s) - log teacher(a|s))`
+from each PPO rollout reward. The reference is the frozen pretrained policy,
+using the same action mask. This sampled KL penalty discourages drift without
+replaying the Qiskit pipeline. It adds one policy forward pass per training
+action and is absent during evaluation. `rollout/teacher_log_ratio` reports the
+sampled log ratio; `rollout/ep_rew_mean` includes action costs but excludes this
+callback penalty. Final evaluation ESP always uses the unchanged metric.
+
+Omitting this section disables all three changes. Use a fresh output directory
+when enabling them; an existing run cannot resume with changed settings or
+source. These settings do not guarantee that PPO matches the pretrained policy
+or Qiskit on every circuit.
+
+In one local continuation from 69,632 to 77,824 PPO steps, the settings above
+raised mean ESP from 78.98% to 79.19% and reduced mean actions from 11.79 to
+9.97. Ordinary continuation reached 79.05%; the pretrained model and Qiskit
+reached 79.29% and 79.38%. Both continuations used 309 training circuits. All
+used the same 41 circuits and ten evaluation seeds per circuit. This is an
+exploratory comparison with one training seed; the advantage over ordinary
+continuation is not statistically conclusive. A separate 8,192-step run from the
+pretrained model with coefficient 0.02 did not improve ESP. The checked-in
+training configurations therefore keep these controls disabled.
+
 ## Configuration and recovery
 
 Defaults are ESP, 100,000 requested training steps, 32 actions per episode, seed
@@ -89,6 +133,9 @@ before translation; `VF2PostLayout` is its configuration for native gates. The
 paper mask allows the former on routed physical circuits before synthesis.
 Qiskit's native graph is kept inside the worker between actions: rebuilding it
 can change later synthesis choices even when the rebuilt circuit is equivalent.
+Before layout, TKET optimization uses one quantum register to preserve logical
+wire order. When an SDK conversion renames logical qubits, the worker translates
+retained virtual-permutation metadata to the new names before mapping.
 Intermediate consolidated unitary blocks have unavailable proxy rewards; final
 scores still use the shared ESP calculation.
 
