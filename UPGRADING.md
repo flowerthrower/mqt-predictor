@@ -8,6 +8,13 @@ of changes including minor and patch releases, please refer to the
 
 ### SCASIA experiment runs
 
+Use `experiments/scasia-pretrained.toml` to start a new PPO run from the bundled
+20-epoch GNN. It imports weights and optimizer state into
+`gnn-pretrained-v4/paper`, adds previous-action observations and skips teacher
+replay. Keep old runs on their recorded source revision; their strict code
+identity prevents resuming them after this update. The new run's `--resume`
+continues its own rolling checkpoint.
+
 The paper row now uses terminal-only ESP, gamma 1.0, and masks canonical Qiskit
 actions after they leave the circuit, layout, and retained pass properties
 unchanged. Start fresh training in `gnn-warmstart-v3/paper`; the default TOML

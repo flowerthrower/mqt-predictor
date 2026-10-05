@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import pytest
+import torch
 from bqskit.compiler.passdata import PassData
 from pytket.circuit import Node, Qubit
 from pytket.extensions.qiskit import qiskit_to_tk
@@ -37,6 +38,7 @@ from qiskit.quantum_info import Operator
 from qiskit.transpiler import Layout, PassManager, TransformationPass, TranspileLayout
 from qiskit.transpiler.passes import VF2PostLayout
 from qiskit.transpiler.preset_passmanagers import common, generate_preset_pass_manager
+from stable_baselines3.common import save_util
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 from mqt.predictor.reward import estimated_success_probability
@@ -380,6 +382,33 @@ def test_paper_graph_preserves_normalized_sizes(inputs: Inputs, config: dict[str
     ])
     assert wrapped.graph_observation["global_features"][0, 1] < 1
     assert wrapped.graph_observation.num_nodes == 100
+
+
+def test_previous_action_observation_after_failed_layout(inputs: Inputs, config: dict[str, Any]) -> None:
+    """A failed VF2 probe remains visible to the policy until the next reset."""
+    env = scasia.make_env("paper", config, inputs)
+    wrapped = scasia.PreviousActionObservationWrapper(env)
+    circuit = QuantumCircuit(5)
+    for target in range(1, 5):
+        circuit.cx(0, target)
+    action = next(index for index, candidate in env.action_set.items() if candidate.name == "VF2Layout")
+    try:
+        wrapped.reset(circuit, seed=0)
+        assert wrapped.graph_observation["global_features"].shape == (1, 37 + len(env.action_set))
+        assert not wrapped.graph_observation["global_features"][0, 37:].any()
+        _, _, terminated, truncated, _ = wrapped.step(action)
+        assert not terminated
+        assert not truncated
+        assert env.last_result["status"] == "ok"
+        assert env.layout is None
+        assert env.state == circuit
+        expected = torch.zeros(len(env.action_set))
+        expected[action] = 1
+        torch.testing.assert_close(wrapped.graph_observation["global_features"][0, 37:], expected)
+        wrapped.reset(circuit, seed=0)
+        assert not wrapped.graph_observation["global_features"][0, 37:].any()
+    finally:
+        env.close()
 
 
 @pytest.mark.parametrize("mode", ["original", "paper"])
@@ -953,10 +982,14 @@ def test_inaccurate_synthesis_fails_and_recovers(
 
 
 @pytest.mark.model_training
-@pytest.mark.parametrize(("compiler", "warmstart_epochs"), [("original", 0), ("paper", 0), ("paper", 2)])
+@pytest.mark.parametrize(
+    ("compiler", "warmstart_epochs", "pretrained"),
+    [("original", 0, False), ("paper", 0, False), ("paper", 2, False), ("paper", 0, True)],
+)
 def test_training_save_load_resume(
     compiler: str,
     warmstart_epochs: int,
+    pretrained: bool,
     inputs: Inputs,
     config: dict[str, Any],
     tmp_path: Path,
@@ -968,8 +1001,15 @@ def test_training_save_load_resume(
     config["original"]["ppo"].update(n_steps=2, batch_size=2, n_epochs=1)
     config["paper"]["gnn"].update(n_steps=2, batch_size=2, n_epochs=1)
     config["paper"]["warmstart"].update(epochs=warmstart_epochs, batch_size=2)
-    if warmstart_epochs:
+    if warmstart_epochs or pretrained:
         config["experiment"]["episode_actions"] = 32
+    if pretrained:
+        config["paper"]["warmstart"]["checkpoint"] = str(ROOT / "experiments/assets/gnn-context20.zip")
+
+        def reject_teacher(*_args: object, **_kwargs: object) -> None:
+            pytest.fail("Pretrained runs must not replay the teacher.")
+
+        monkeypatch.setattr(scasia, "collect_demonstrations", reject_teacher)
     monkeypatch.setattr(inputs, "names", lambda split: [f"{split}/{'ghz' if split == 'train' else 'bv'}_2_indep.qasm"])
     env = scasia.make_env(compiler, config, inputs)
     manifest: dict[str, Any] = {
@@ -996,6 +1036,10 @@ def test_training_save_load_resume(
         if warmstart_epochs:
             assert (tmp_path / "warmstart.zip").is_file()
             assert len(manifest["warmstart"]["epochs"]) == warmstart_epochs
+        if pretrained:
+            assert manifest["checkpoints"]["warmstart"]["timesteps"] == 0
+            assert manifest["checkpoints"]["warmstart"]["warmstart_epochs"] == 20
+            assert manifest["pretrained"]["warmstart_epochs"] == 20
         scasia.train(compiler, config, env, tmp_path, manifest, resume=True)
         gc.collect()
         assert manifest["actual_training_timesteps"] == 4
@@ -1021,6 +1065,75 @@ def test_training_save_load_resume(
         for checkpoint in tmp_path.glob("*.zip"):
             checkpoint.unlink()
         gc.collect()
+
+
+def test_pretrained_import_preserves_parameters_and_fresh_schedule(
+    inputs: Inputs, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Import tensors without old Python metadata, then load a portable native checkpoint."""
+    config = scasia.resolve_config(ROOT / "experiments/scasia-pretrained.toml")
+    config["output"] = str(tmp_path)
+    config["experiment"]["training_timesteps"] = 0
+    checkpoint = Path(config["paper"]["warmstart"]["checkpoint"])
+    _, parameters, _ = save_util.load_from_zip_file(checkpoint, load_data=False, device="cpu")
+    env = scasia.make_env("paper", config, inputs)
+    manifest: dict[str, Any] = {
+        "identity": scasia.run_identity(config, inputs, env, "paper"),
+        "restarts": [],
+        "checkpoints": {},
+    }
+
+    def reject_metadata(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("Pretrained import must not deserialize Python-specific checkpoint metadata.")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(save_util, "json_to_data", reject_metadata)
+            patch.setattr(scasia, "collect_demonstrations", reject_metadata)
+            scasia.train("paper", config, env, tmp_path, manifest, resume=False)
+        model = scasia.GNNMaskablePPO.load(tmp_path / "final.zip")
+        torch.testing.assert_close(model.get_parameters(), parameters, rtol=0, atol=0)
+        assert model.num_timesteps == 0
+        assert model.__dict__["scasia_warmstart_epochs"] == 20
+        assert model.tensorboard_log == str(tmp_path / "logs")
+        assert model.seed == config["experiment"]["training_seed"]
+        assert [model.lr_schedule(progress) for progress in (1, 0.5, 0)] == pytest.approx([0.001, 0.00055, 0.0001])
+        assert type(model.policy.features_extractor).__module__ == "mqt.predictor.rl.experiments.observations"
+        assert manifest["actual_training_timesteps"] == 0
+        assert manifest["pretrained"]["sha256"] == scasia.digest(checkpoint.read_bytes())
+        assert manifest["checkpoints"]["checkpoint"]["warmstart_epochs"] == 20
+    finally:
+        env.close()
+        for path in tmp_path.glob("*.zip"):
+            path.unlink()
+        gc.collect()
+
+
+@pytest.mark.parametrize("field", ["sha256", "inputs", "actions"])
+def test_pretrained_import_rejects_incompatible_source(
+    field: str, inputs: Inputs, config: dict[str, Any], tmp_path: Path
+) -> None:
+    """Reject a changed model, dataset or action order before starting training."""
+    source = ROOT / "experiments/assets/gnn-context20.zip"
+    checkpoint = tmp_path / "source.zip"
+    checkpoint.symlink_to(source)
+    metadata = json.loads(source.with_suffix(".json").read_text())
+    metadata[field] = "changed"
+    checkpoint.with_suffix(".json").write_text(json.dumps(metadata))
+    config["paper"]["warmstart"].update(checkpoint=str(checkpoint), epochs=0)
+    config["experiment"]["training_timesteps"] = 0
+    env = scasia.make_env("paper", config, inputs)
+    manifest: dict[str, Any] = {
+        "identity": scasia.run_identity(config, inputs, env, "paper"),
+        "restarts": [],
+        "checkpoints": {},
+    }
+    try:
+        with pytest.raises(ValueError, match="Pretrained checkpoint differs"):
+            scasia.train("paper", config, env, tmp_path, manifest, resume=False)
+        assert not (tmp_path / "checkpoint.zip").exists()
+    finally:
+        env.close()
 
 
 @pytest.mark.model_training

@@ -25,6 +25,41 @@ The checked-in configuration starts a fresh `gnn-warmstart-v3` run below
 evaluates in `gnn-warmstart-v3/paper`. Use this new output directory after
 updating; do not resume a v1 or v2 checkpoint with the changed reward and masks.
 
+## Continue the pretrained GNN
+
+`scasia-pretrained.toml` starts PPO from the bundled 20-epoch model in a new
+`../../scasia-runs/gnn-pretrained-v4/paper` directory. Run inside `tmux` on the
+cluster so disconnecting SSH does not interrupt training:
+
+```sh
+tmux new -s scasia-v4
+uv run --frozen --extra gnn python -m mqt.predictor.rl.experiments.scasia --compiler paper --config experiments/scasia-pretrained.toml --stage all
+```
+
+Detach with `Ctrl-b`, then `d`; reconnect with `tmux attach -t scasia-v4`. Add
+`--resume` to the same Python command after an interrupted run. The model starts
+with 20 completed imitation epochs and zero PPO steps. Its first ten epochs used
+all 321 training circuits; the next ten used 309 and added previous-action
+observations. The bundled JSON lists the 12 exclusions and source provenance.
+PPO uses the full original 321-circuit training split.
+
+The importer checks the checkpoint hash, frozen inputs, target, action order and
+model settings. It restores policy and Adam tensors without loading
+Python-specific metadata from the local prototype. It starts the configured PPO
+schedule, seed and log directory, skips teacher replay, and records the source
+checkpoint in the manifest. The input retains 37 normalized globals and appends
+45 previous-action indicators, cleared at reset. `warmstart.zip` preserves the
+imported model alongside the rolling and final PPO checkpoints. The default
+budget remains 100,000 requested PPO steps (100,352 actual). Set
+`training_timesteps = 0` to evaluate the imported model without PPO.
+
+This checkpoint uses the ordinary teacher labels with the best local ESP; it
+does not include the experimental earlier-stop labels, stage inputs or
+rare-action weighting. Local evaluation gave 79.23% mean ESP across 41 circuits
+and three repetitions, versus Qiskit's 79.37%. These circuits were already
+inspected during prototype development; this is not a held-out claim or evidence
+that PPO preserves the result.
+
 ## Configuration and recovery
 
 Defaults are ESP, 100,000 requested training steps, 32 actions per episode, seed

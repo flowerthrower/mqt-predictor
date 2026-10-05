@@ -12,6 +12,9 @@ releases may include breaking changes.
 
 ### Added
 
+- ✨ Continue SCASIA PPO from the bundled pretrained GNN with previous-action
+  observations and verified checkpoint provenance ([SCASIA experiments])
+  ([**@flowerthrower**])
 - ✨ Compare named SCASIA run folders together in the notebook, including
   multiple GNN variants ([SCASIA experiments]) ([**@flowerthrower**])
 - ✨ Add an opt-in GNN policy with a tuned paper preset and SB3 training using

@@ -34,6 +34,7 @@ from mqt.predictor.rl.gnn import GNNConfig, GNNMaskablePPO, GNNObservationWrappe
 from .environment import ExperimentEnv, OriginalEnv
 from .inputs import Inputs, digest, load_target
 from .metrics import efficiency, observe
+from .observations import NormalizedGNNObservationWrapper, PreviousActionObservationWrapper, add_previous_action_inputs
 from .qiskit_teacher import collect_demonstrations, fit_demonstrations
 from .worker import CompilerWorker
 
@@ -53,6 +54,12 @@ def resolve_config(path: Path) -> dict[str, Any]:
     config = tomllib.loads(path.read_text(encoding="utf-8"))
     config["assets"] = str((path.parent / config["assets"]).resolve())
     config["output"] = str((path.parent / config["output"]).resolve())
+    checkpoint = config["paper"]["warmstart"].get("checkpoint")
+    if checkpoint:
+        config["paper"]["warmstart"]["checkpoint"] = str((path.parent / checkpoint).resolve())
+        if config["paper"]["warmstart"]["epochs"]:
+            msg = "Set warmstart.epochs = 0 when importing a pretrained checkpoint."
+            raise ValueError(msg)
     config["paper"]["gnn"] = asdict(replace(GNNConfig.paper(), **config["paper"]["gnn"]))
     config["original"]["ppo"] = {"clip_range_vf": None, "target_kl": None, **config["original"]["ppo"]}
     for key in ("episode_actions", "evaluation_repetitions", "checkpoint_steps"):
@@ -99,23 +106,22 @@ def make_env(compiler: str, config: dict[str, Any], inputs: Inputs) -> Experimen
     return cls(target, inputs, worker, config["experiment"], compiler)
 
 
-class NormalizedGNNObservationWrapper(GNNObservationWrapper):
-    """Keep the environment's normalized sizes in the experiment's graph input."""
-
-    def _update_graph_observation(self, observation: dict[str, Any]) -> None:
-        super()._update_graph_observation(observation)
-        self.graph_observation["global_features"][0, :2] = torch.as_tensor([
-            observation["num_qubits"].item(),
-            observation["depth"].item(),
-        ])
-
-
 def run_identity(config: dict[str, Any], inputs: Inputs, env: ExperimentEnv, compiler: str) -> dict[str, Any]:
     """Record code, lock, installed dependencies, actions and frozen input hashes."""
     root = Path(__file__).resolve().parents[5]
     sources = {str(path.relative_to(root)): digest(path.read_bytes()) for path in sorted((root / "src").rglob("*.py"))}
     versions = {dist.metadata["Name"]: dist.version for dist in importlib.metadata.distributions()}
     settings = {key: value for key, value in config.items() if key not in {"assets", "output"}}
+    if checkpoint := config["paper"]["warmstart"].get("checkpoint"):
+        path = Path(checkpoint)
+        warmstart = {
+            **settings["paper"]["warmstart"],
+            "checkpoint": {
+                "sha256": digest(path.read_bytes()),
+                "metadata_sha256": digest(path.with_suffix(".json").read_bytes()),
+            },
+        }
+        settings["paper"] = {**settings["paper"], "warmstart": warmstart}
     return {
         "compiler": compiler,
         "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
@@ -182,15 +188,59 @@ class RollingCheckpoint(BaseCallback):
         self.save("final")
 
 
+def import_pretrained(
+    model: GNNMaskablePPO, config: dict[str, Any], env: ExperimentEnv, manifest: dict[str, Any]
+) -> None:
+    """Import verified policy and Adam tensors into a fresh, configured PPO run."""
+    path = Path(config["paper"]["warmstart"]["checkpoint"])
+    metadata = json.loads(path.with_suffix(".json").read_text())
+    architecture = ("hidden_dim", "num_conv_wo_resnet", "num_resnet_layers", "dropout_p", "bidirectional")
+    gnn = config["paper"]["gnn"]
+    if (
+        digest(path.read_bytes()) != metadata["sha256"]
+        or metadata["num_timesteps"] != 0
+        or metadata["inputs"] != env.inputs.manifest
+        or metadata["actions"] != [action.name for action in env.action_set.values()]
+        or metadata["target"] != manifest["identity"]["target"]
+        or metadata["lock_sha256"] != manifest["identity"]["lock_sha256"]
+        or any(metadata["gnn"][key] != gnn[key] for key in architecture)
+        or metadata["objective"] != config["experiment"]["objective"]
+        or metadata["episode_actions"] != config["experiment"]["episode_actions"]
+        or metadata["gnn"]["gamma"] != gnn["gamma"]
+        or metadata["optimizer_learning_rate_scales"] != [gnn["gnn_learning_rate"] / gnn["learning_rate"], 1.0]
+    ):
+        msg = "Pretrained checkpoint differs in hash, inputs, actions, target, architecture or objective."
+        raise ValueError(msg)
+    add_previous_action_inputs(model, len(env.action_set))
+    # SB3 loads policy and optimizer tensors without deserializing Python-specific checkpoint metadata.
+    model.set_parameters(str(path))
+    model.__dict__["scasia_warmstart_epochs"] = metadata["warmstart_epochs"]
+    manifest["pretrained"] = {
+        "checkpoint": path.name,
+        "sha256": metadata["sha256"],
+        "metadata_sha256": digest(path.with_suffix(".json").read_bytes()),
+        "source_commit": metadata["source_commit"],
+        "warmstart_epochs": metadata["warmstart_epochs"],
+        "training": metadata["training"],
+        "imported": "policy and optimizer tensors; fresh PPO schedule, seed, logs and timestep count",
+    }
+
+
 def train(
     compiler: str, config: dict[str, Any], env: ExperimentEnv, output: Path, manifest: dict[str, Any], *, resume: bool
 ) -> None:
     """Train to the requested total budget, completing whole SB3 rollouts."""
     settings = config["experiment"]
-    if settings["training_timesteps"] == 0 and (compiler != "paper" or config["paper"]["warmstart"]["epochs"] == 0):
+    pretrained = compiler == "paper" and bool(config["paper"]["warmstart"].get("checkpoint"))
+    if (
+        settings["training_timesteps"] == 0
+        and not pretrained
+        and (compiler != "paper" or config["paper"]["warmstart"]["epochs"] == 0)
+    ):
         msg = "Zero PPO steps require a paper behavior-cloning run"
         raise ValueError(msg)
-    wrapped = NormalizedGNNObservationWrapper(env) if compiler == "paper" else env
+    wrapper = PreviousActionObservationWrapper if pretrained else NormalizedGNNObservationWrapper
+    wrapped = wrapper(env) if compiler == "paper" else env
     model_class = GNNMaskablePPO if compiler == "paper" else MaskablePPO
     identity = digest(json.dumps(manifest["identity"], sort_keys=True).encode())
     if resume:
@@ -213,6 +263,8 @@ def train(
             tensorboard_log=str(output / "logs"),
             seed=settings["training_seed"],
         )
+        if pretrained:
+            import_pretrained(model, config, env, manifest)
     else:
         model = MaskablePPO(
             "MultiInputPolicy",
@@ -233,6 +285,9 @@ def train(
     remaining = max(0, settings["training_timesteps"] - model.num_timesteps)
     callback = RollingCheckpoint(output, manifest, settings["checkpoint_steps"])
     callback.init_callback(model)
+    if pretrained and not resume:
+        callback.save("checkpoint")
+        callback.save("warmstart")
     if (
         compiler == "paper"
         and model.__dict__.get("scasia_warmstart_epochs", 0) < config["paper"]["warmstart"]["epochs"]
@@ -277,7 +332,9 @@ def evaluate(
     """Retain every independent compilation, including failed repetitions."""
     settings = config["experiment"]
     model = None
-    wrapped = NormalizedGNNObservationWrapper(env) if compiler == "paper" else env
+    pretrained = compiler == "paper" and bool(config["paper"]["warmstart"].get("checkpoint"))
+    wrapper = PreviousActionObservationWrapper if pretrained else NormalizedGNNObservationWrapper
+    wrapped = wrapper(env) if compiler == "paper" else env
     if compiler in {"original", "paper"}:
         cls = GNNMaskablePPO if compiler == "paper" else MaskablePPO
         model = cls.load(output / "final.zip")
