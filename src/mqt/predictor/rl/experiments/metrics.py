@@ -47,6 +47,9 @@ def observe(circuit: QuantumCircuit, target: Target, *, physical: bool) -> dict[
         "depth": circuit.depth(),
         "gate_counts": dict(circuit.count_ops()),
     }
+    if "unitary" in result["gate_counts"]:
+        result["score_error"] = "ESP proxy does not support unitary blocks."
+        return result
     try:  # ruff: ignore[too-many-statements-in-try-clause] -- unavailable calibration is recorded, not a failed job.
         if native and physical and routed:
             result["expected_fidelity"] = expected_fidelity(circuit, target)

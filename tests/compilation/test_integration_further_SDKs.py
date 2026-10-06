@@ -258,6 +258,54 @@ def test_tket_layout_and_routing_actions_are_masked_for_wide_operations(env: Pre
         assert env.is_circuit_routed(env.state, env.device.build_coupling_map())
 
 
+@pytest.mark.parametrize("reuse_measured_qubit", [False, True])
+def test_bqskit_actions_require_terminal_measurements(env: PredictorEnv, reuse_measured_qubit: bool) -> None:
+    """Independent operations and barriers after a measurement remain supported."""
+    circuit = QuantumCircuit(2, 2)
+    circuit.h(0)
+    circuit.measure(0, 0)
+    circuit.barrier()
+    circuit.rx(0.3, 0 if reuse_measured_qubit else 1)
+    circuit.measure(1, 1)
+    env.reset(circuit)
+    env.valid_actions = list(env.action_set)
+
+    action_mask = env.action_masks()
+    bqskit_indices = [index for index, action in env.action_set.items() if action.origin == CompilationOrigin.BQSKIT]
+
+    assert bqskit_indices
+    assert all(action_mask[index] == (not reuse_measured_qubit) for index in bqskit_indices)
+
+
+def test_bqskit_rejects_tket_measurements_before_terminal_swaps(
+    env: PredictorEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reject a real TKET output before BQSKit can move its measurements across swaps."""
+    circuit = QuantumCircuit(3, 3)
+    circuit.rx(0.3, 0)
+    circuit.rx(0.8, 1)
+    circuit.cx(0, 1)
+    circuit.cx(1, 0)
+    circuit.cx(0, 1)
+    circuit.cx(1, 2)
+    circuit.measure(range(3), [1, 2, 0])
+    env.reset(circuit)
+    tket_index = next(index for index, action in env.action_set.items() if action.name == "PeepholeOptimise2Q")
+    env.state = env.apply_action(tket_index)
+    env.valid_actions = env.determine_valid_actions_for_state()
+    assert env.state.count_ops().get("swap")
+
+    monkeypatch.setattr(
+        bqskit_actions, "qiskit_to_bqskit", lambda _: pytest.fail("Rejected actions must not enter BQSKit.")
+    )
+    action_mask = env.action_masks()
+    for index, action in env.action_set.items():
+        if action.origin == CompilationOrigin.BQSKIT:
+            assert not action_mask[index]
+            with pytest.raises(ValueError, match="measurements to be terminal on each qubit"):
+                env.apply_action(index)
+
+
 def test_synthesis_actions_produce_native_gates(
     simple_circuit: QuantumCircuit,
     env: PredictorEnv,

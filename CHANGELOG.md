@@ -12,6 +12,9 @@ releases may include breaking changes.
 
 ### Added
 
+- ✨ Add a fresh eight-epoch SCASIA teacher experiment with previous-action
+  observations and verified failed VF2 layout attempts ([SCASIA experiments])
+  ([**@flowerthrower**])
 - ✨ Add opt-in exact ESP observations, per-action costs, and a frozen-policy KL
   penalty for pretrained SCASIA PPO runs ([SCASIA experiments])
   ([**@flowerthrower**])
@@ -43,6 +46,9 @@ releases may include breaking changes.
 
 ### Changed
 
+- ✨ Complete SCASIA block consolidation and synthesis in one action; regenerate
+  demonstrations with the corresponding O3 variant ([SCASIA experiments])
+  ([**@flowerthrower**])
 - ✨ Use terminal-only ESP, gamma 1.0, and observed canonical no-op masks for
   SCASIA paper runs ([SCASIA experiments]) ([**@flowerthrower**])
 - 🐛 Preserve TKET and Qiskit routing permutations across repeated routing,
@@ -68,6 +74,9 @@ releases may include breaking changes.
 
 ### Fixed
 
+- 🐛 Reject BQSKit actions when a measured qubit is used again, and record
+  internal unitary-block scores as unavailable without aborting compilation
+  ([SCASIA experiments]) ([**@flowerthrower**])
 - 🐛 Preserve SCASIA logical wire order and virtual permutations across SDK
   conversions ([SCASIA experiments]) ([**@flowerthrower**])
 - 🐛 Ignore barriers when scoring SCASIA routing validity ([SCASIA experiments])

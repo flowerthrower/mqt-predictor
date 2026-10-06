@@ -70,7 +70,7 @@ def configure_actions(env: PredictorEnv) -> None:
         preserves_synthesis=True,
     )
     env.action_terminate_index = index + 1
-    for name in ("ConsolidateBlocks", "TwoQubitPeepholeOptimization", "VF2PostLayout_2q"):
+    for name in ("TwoQubitPeepholeOptimization", "VF2PostLayout_2q"):
         env.action_set[env.action_terminate_index + 1] = env.action_set[env.action_terminate_index]
         env.action_set[env.action_terminate_index] = DeferredDeviceAction(
             name,

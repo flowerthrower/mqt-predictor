@@ -8,6 +8,25 @@ of changes including minor and patch releases, please refer to the
 
 ### SCASIA experiment runs
 
+SCASIA now has 44 actions instead of 45. Block consolidation and synthesis run
+together in `Opt2qBlocks`; standalone `ConsolidateBlocks` is removed. Both RL
+rows require fresh training in a new output directory. The bundled 20-epoch
+checkpoint and pretrained configurations use the old action space; reproduce
+those runs on their recorded revision (through `c29f0392`). Do not import or
+resume their weights on this revision.
+
+Use `experiments/scasia.toml` with a fresh `output` to regenerate teacher data.
+The teacher now uses an O3 variant that completes block synthesis before layout.
+Its output can differ from native O3, which remains the Qiskit baseline. Replay
+still checks the teacher's final circuit, output mapping, and ESP exactly.
+
+Use `experiments/scasia-atomic-v7.toml` for eight teacher epochs followed by
+evaluation, without PPO. Its `paper.previous_action = true` setting enables
+context inputs from the start and retains actual failed VF2 searches in teacher
+replay. Default runs without this setting retain their existing observations.
+
+The following pretrained-run instructions apply to the earlier 45-action schema.
+
 Pretrained runs can enable `[paper.refinement]` for exact ESP observations,
 action costs, and a frozen-policy KL penalty. All three are disabled when the
 section is absent. Start a fresh output directory when changing these settings;
@@ -120,6 +139,9 @@ remaining fraction of the pass budget in `[0, 1]` (`1` when unlimited).
 new observation schema.
 
 ### Atomic BQSKit compilation actions
+
+BQSKit actions require measurements to be terminal on each qubit. Direct callers
+of `is_bqskit_action_available` must now pass `circuit` for this check.
 
 The composite actions `BQSKitO2`, `BQSKitSynthesis`, and `BQSKitMapping` are no
 longer available. Each of them ran several compilation steps at once. They have

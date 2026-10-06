@@ -258,7 +258,8 @@ def train(
         msg = "Zero PPO steps require a paper behavior-cloning run"
         raise ValueError(msg)
     refinement = config["paper"].get("refinement", {})
-    if pretrained:
+    previous_action = compiler == "paper" and (pretrained or config["paper"].get("previous_action", False))
+    if previous_action:
         wrapped = PreviousActionObservationWrapper(env, quality_features=refinement.get("quality_features", False))
     else:
         wrapped = NormalizedGNNObservationWrapper(env) if compiler == "paper" else env
@@ -288,6 +289,8 @@ def train(
             import_pretrained(model, config, env, manifest)
             if refinement.get("quality_features", False):
                 add_quality_inputs(model)
+        elif previous_action:
+            add_previous_action_inputs(model, len(env.action_set))
     else:
         model = MaskablePPO(
             "MultiInputPolicy",
@@ -318,7 +321,9 @@ def train(
         assert isinstance(wrapped, GNNObservationWrapper)
         assert isinstance(model, GNNMaskablePPO)
         callback.save("checkpoint")
-        samples, report = collect_demonstrations(wrapped, settings["training_seed"], model.gamma)
+        samples, report = collect_demonstrations(
+            wrapped, settings["training_seed"], model.gamma, retain_failed_layouts=previous_action
+        )
         write_json(output / "teacher.json", report)
         manifest.setdefault("warmstart", {"epochs": []})
         manifest["warmstart"]["demonstration_seconds"] = (
@@ -361,7 +366,8 @@ def evaluate(
     settings = config["experiment"]
     model = None
     pretrained = compiler == "paper" and bool(config["paper"]["warmstart"].get("checkpoint"))
-    if pretrained:
+    previous_action = compiler == "paper" and (pretrained or config["paper"].get("previous_action", False))
+    if previous_action:
         wrapped = PreviousActionObservationWrapper(
             env, quality_features=config["paper"].get("refinement", {}).get("quality_features", False)
         )

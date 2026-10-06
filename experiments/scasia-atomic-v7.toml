@@ -6,13 +6,14 @@
 #
 # Licensed under the MIT License
 
-# Paths are relative to this TOML file. Use a shared cluster scratch directory for output.
+# Fresh teacher training and evaluation for the 44-action registry.
+# Paths are relative to this TOML file.
 assets = "assets"
-output = "../../scasia-runs/gnn-warmstart-v3"
+output = "../../scasia-runs/gnn-atomic-v7"
 
 [experiment]
 objective = "estimated_success_probability"
-training_timesteps = 100000
+training_timesteps = 0
 episode_actions = 32
 training_seed = 0
 evaluation_seed = 0
@@ -20,7 +21,6 @@ evaluation_repetitions = 10
 checkpoint_steps = 2048
 reward_scale = 1.0
 no_effect_penalty = -0.001
-# Zero means all 41 evaluation circuits. A smaller value is for smoke tests only.
 evaluation_circuits = 0
 
 [worker]
@@ -30,8 +30,8 @@ threads = 1
 bqskit_workers = 1
 
 [original]
-bqskit_port = 17472
-bqskit_worker_port = 17474
+bqskit_port = 27472
+bqskit_worker_port = 27474
 
 [original.ppo]
 learning_rate = 0.0003
@@ -45,18 +45,17 @@ normalize_advantage = true
 ent_coef = 0.0
 vf_coef = 0.5
 max_grad_norm = 0.5
-# SB3 defaults: clip_range_vf = None, target_kl = None, two 64-unit Tanh layers.
 
 [paper]
-bqskit_port = 18472
-bqskit_worker_port = 18474
+bqskit_port = 28472
+bqskit_worker_port = 28474
+previous_action = true
 
 [paper.gnn]
-# Terminal-only ESP with no discount for longer compilations.
 gamma = 1.0
 
 [paper.warmstart]
-# Replay the O3 variant with atomic block synthesis, imitate its actions, then run PPO.
-# Set epochs = 0 for RL from scratch; training_timesteps = 0 for imitation only.
-epochs = 5
+# Train fresh weights; the bundled 45-action checkpoint is incompatible.
+# Retain failed VF2 layout attempts so the model can learn when to try routing.
+epochs = 8
 batch_size = 8

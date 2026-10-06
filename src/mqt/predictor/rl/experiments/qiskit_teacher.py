@@ -6,7 +6,7 @@
 #
 # Licensed under the MIT License
 
-"""Canonical Qiskit actions and accepted O3 demonstrations for SCASIA."""
+"""Canonical Qiskit actions and atomic block-synthesis demonstrations for SCASIA."""
 
 from __future__ import annotations
 
@@ -23,10 +23,12 @@ from qiskit.passmanager import ConditionalController, DoWhileController, FlowCon
 from qiskit.passmanager.compilation_status import PassManagerState, WorkflowStatus
 from qiskit.transpiler import PassManager, TranspileLayout
 from qiskit.transpiler.basepasses import BasePass
-from qiskit.transpiler.passes import VF2PostLayout
+from qiskit.transpiler.passes import ConsolidateBlocks, Decompose, VF2PostLayout
 from qiskit.transpiler.passes.layout.vf2_layout import VF2LayoutStopReason
 from qiskit.transpiler.preset_passmanagers import common, generate_preset_pass_manager
 from torch.nn.functional import mse_loss
+
+from mqt.predictor.rl.actions.qiskit_actions import qiskit_optimization_actions
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -48,7 +50,7 @@ if TYPE_CHECKING:
 
 NATIVE_ACTIONS = frozenset({
     "ElidePermutations",
-    "ConsolidateBlocks",
+    "Opt2qBlocks",
     "TwoQubitPeepholeOptimization",
     "VF2Layout",
     "QiskitSabreMapping",
@@ -82,7 +84,10 @@ def passes(task: Task) -> Iterator[BasePass]:
 
 
 def native_passes(name: str, target: Target, seed: int, *, physical: bool) -> list[Task]:
-    """Use O3's pass parameters without executing its selection or optimization loop."""
+    """Build canonical actions, retaining O3's layout and routing parameters."""
+    if name == "Opt2qBlocks":
+        action = next(action for action in qiskit_optimization_actions() if action.name == name)
+        return [*cast("list[Task]", action.transpile_pass), Decompose(gates_to_decompose="unitary")]
     preset = generate_preset_pass_manager(3, target=target, seed_transpiler=seed)
 
     def get(stage: str, pass_name: str) -> BasePass:
@@ -152,10 +157,13 @@ def apply_native_action(
     )
 
 
-def demonstration(circuit: QuantumCircuit, target: Target, seed: int) -> tuple[QuantumCircuit, list[str]]:
-    """Retain O3's accepted changing passes, removing its no-ops and rolled-back suffixes."""
+def demonstration(
+    circuit: QuantumCircuit, target: Target, seed: int, *, retain_failed_layouts: bool = False
+) -> tuple[QuantumCircuit, list[str]]:
+    """Record an O3 variant that completes block synthesis before each action boundary."""
     actions: list[str] = []
     layout_action = "VF2Layout"
+    block_synthesis = False
 
     def exact(dag: DAGCircuit) -> bytes:
         stream = BytesIO()
@@ -164,9 +172,17 @@ def demonstration(circuit: QuantumCircuit, target: Target, seed: int) -> tuple[Q
 
     keys = [exact(circuit_to_dag(circuit))]
 
-    def record(pass_: BasePass, dag: DAGCircuit, **_: object) -> None:
-        nonlocal layout_action
+    def record(pass_: BasePass, dag: DAGCircuit, property_set: PropertySet, **_: object) -> None:
+        nonlocal layout_action, block_synthesis
         name = pass_.name()
+        if name == "Collect2qBlocks":
+            block_synthesis = True
+            return
+        if block_synthesis:
+            if name != "Decompose":
+                return
+            name = "Opt2qBlocks"
+            block_synthesis = False
         if isinstance(pass_, VF2PostLayout):
             layout_action = "VF2PostLayout_2q" if not pass_.strict_direction else name
         elif name == "VF2Layout":
@@ -186,7 +202,12 @@ def demonstration(circuit: QuantumCircuit, target: Target, seed: int) -> tuple[Q
         if name == "BasisTranslator" and actions and actions[-1] == "BasisTranslator":
             keys[-1] = key
             return
-        if key == keys[-1]:
+        failed_layout = (
+            retain_failed_layouts
+            and name == "VF2Layout"
+            and property_set["VF2Layout_stop_reason"] == VF2LayoutStopReason.NO_SOLUTION_FOUND
+        )
+        if key == keys[-1] and not failed_layout:
             return
         action = {
             "ApplyLayout": layout_action,
@@ -201,7 +222,12 @@ def demonstration(circuit: QuantumCircuit, target: Target, seed: int) -> tuple[Q
         actions.append(action)
         keys.append(key)
 
-    output = generate_preset_pass_manager(3, target=target, seed_transpiler=seed).run(circuit, callback=record)
+    preset = generate_preset_pass_manager(3, target=target, seed_transpiler=seed)
+    assert preset.init is not None
+    for index in range(len(preset.init)):
+        if any(isinstance(pass_, ConsolidateBlocks) for pass_ in passes(preset.init[index].to_flow_controller())):
+            preset.init.replace(index, native_passes("Opt2qBlocks", target, seed, physical=False))
+    output = preset.run(circuit, callback=record)
     return output, [*actions, "terminate"]
 
 
@@ -209,6 +235,8 @@ def collect_demonstrations(
     wrapped: GNNObservationWrapper,
     seed: int,
     gamma: float,
+    *,
+    retain_failed_layouts: bool = False,
 ) -> tuple[list[tuple[GraphData, list[bool], int, float]], dict[str, Any]]:
     """Replay every training demonstration through the real environment before fitting."""
     env = cast("ExperimentEnv", wrapped.unwrapped)
@@ -218,7 +246,12 @@ def collect_demonstrations(
     started = time.monotonic()
     for name in env.inputs.names("train"):
         circuit = env.inputs.circuit(name)
-        reference = env.worker.run({"compiler": "teacher", "circuit": circuit, "seed": seed})
+        reference = env.worker.run({
+            "compiler": "teacher",
+            "circuit": circuit,
+            "seed": seed,
+            "retain_failed_layouts": retain_failed_layouts,
+        })
         if reference["status"] != "ok":
             msg = f"O3 teacher failed for {name}: {reference.get('error')}"
             raise RuntimeError(msg)
@@ -247,7 +280,7 @@ def collect_demonstrations(
             or env.layout.final_index_layout() != expected.layout.final_index_layout()
             or env.last_result["score"]["esp"] != reference["score"]["esp"]
         ):
-            msg = f"O3 replay differs from the native pipeline for {name}"
+            msg = f"O3 replay differs from the atomic teacher pipeline for {name}"
             raise ValueError(msg)
         total = 0.0
         returns = []
@@ -267,7 +300,13 @@ def collect_demonstrations(
             "native_runtime_seconds": reference["runtime_seconds"],
         })
         print(f"O3 teacher replay {len(rows)}/{len(env.inputs.names('train'))}: {name}", flush=True)
-    return samples, {"circuits": rows, "transitions": len(samples), "runtime_seconds": time.monotonic() - started}
+    return samples, {
+        "pipeline": "O3 with atomic block synthesis before layout",
+        "retain_failed_layouts": retain_failed_layouts,
+        "circuits": rows,
+        "transitions": len(samples),
+        "runtime_seconds": time.monotonic() - started,
+    }
 
 
 def fit_demonstrations(

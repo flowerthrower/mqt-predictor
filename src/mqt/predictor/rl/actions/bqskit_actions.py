@@ -548,8 +548,11 @@ def run_bqskit_action(
         Tuple of (compiled circuit, updated layout).
 
     Raises:
-        ValueError: If a routing action is applied without a layout or output-qubit metadata.
+        ValueError: If a measured qubit is used again, or routing lacks layout metadata.
     """
+    if _has_nonterminal_measurements(circuit):
+        msg = "BQSKit actions require measurements to be terminal on each qubit."
+        raise ValueError(msg)
     bqskit_qc = qiskit_to_bqskit(circuit)
 
     # SYNTHESIS actions use device factory
@@ -597,7 +600,19 @@ def run_bqskit_action(
     raise ValueError(msg)
 
 
-def is_bqskit_action_available(*, has_parameterized_gates: bool) -> bool:
+def _has_nonterminal_measurements(circuit: QuantumCircuit) -> bool:
+    """Check whether moving all measurements to the end could change the circuit."""
+    measured: set[QiskitQubit] = set()
+    for instruction in circuit.data:
+        if instruction.operation.name == "barrier":
+            continue
+        if any(qubit in measured for qubit in instruction.qubits):
+            return True
+        if instruction.operation.name == "measure":
+            measured.update(instruction.qubits)
+    return False
+
+
+def is_bqskit_action_available(*, circuit: QuantumCircuit, has_parameterized_gates: bool) -> bool:
     """Return whether a BQSKit action is available for the current circuit state."""
-    # BQSKit does not support parameterized gates
-    return not has_parameterized_gates
+    return not has_parameterized_gates and not _has_nonterminal_measurements(circuit)

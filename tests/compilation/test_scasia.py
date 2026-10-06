@@ -89,6 +89,32 @@ def config(tmp_path: Path) -> dict[str, Any]:
 
 
 @pytest.fixture
+def pretrained_checkpoint(inputs: Inputs, config: dict[str, Any], tmp_path: Path) -> Path:
+    """Save an untrained checkpoint with the current action and observation shapes."""
+    env = scasia.make_env("paper", config, inputs)
+    wrapped = scasia.PreviousActionObservationWrapper(env)
+    try:
+        model = scasia.create_gnn_model(
+            wrapped, scasia.GNNConfig(**config["paper"]["gnn"]), verbose=0, tensorboard_log=str(tmp_path), seed=0
+        )
+        scasia.add_previous_action_inputs(model, len(env.action_set))
+        path = tmp_path / "pretrained.zip"
+        model.save(path)
+        metadata = json.loads((ROOT / "experiments/assets/gnn-context20.json").read_text())
+        metadata.update(
+            sha256=scasia.digest(path.read_bytes()),
+            actions=[action.name for action in env.action_set.values()],
+            gnn=config["paper"]["gnn"],
+            source_commit="test fixture",
+            training={"kind": "untrained checkpoint for import tests"},
+        )
+        path.with_suffix(".json").write_text(json.dumps(metadata))
+        return path
+    finally:
+        wrapped.close()
+
+
+@pytest.fixture
 def comparison_results(tmp_path: Path) -> Path:
     """Two circuits with unequal matched coverage, a timeout and a missing row."""
     for compiler in ("qiskit", "tket", "original", "paper"):
@@ -335,6 +361,7 @@ def test_distinct_methods_shared_actions(inputs: Inputs, config: dict[str, Any])
     names = {action.name for action in paper.action_set.values()}
     assert names.isdisjoint({"QiskitO3", "MGDPass", "AIRouting", "AIRouting_opt"})
     assert {"Optimize1qGatesDecomposition_preserve", "Opt2qBlocks_preserve"}.issubset(names)
+    assert "ConsolidateBlocks" not in names
     assert cast("Discrete", paper.action_space).n == len(paper.action_set)
     circuit = QuantumCircuit(2)
     circuit.h(0)
@@ -408,6 +435,30 @@ def test_previous_action_observation_after_failed_layout(inputs: Inputs, config:
         torch.testing.assert_close(wrapped.graph_observation["global_features"][0, 37:], expected)
         wrapped.reset(circuit, seed=0)
         assert not wrapped.graph_observation["global_features"][0, 37:].any()
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("mode", ["original", "paper"])
+def test_block_synthesis_action_observation(mode: str, inputs: Inputs, config: dict[str, Any]) -> None:
+    """Expose synthesized gates to the policy only after the whole block action completes."""
+    env = scasia.make_env(mode, config, inputs)
+    circuit = QuantumCircuit(2)
+    circuit.h(0)
+    circuit.cx(0, 1)
+    circuit.rx(0.3, 1)
+    circuit.cx(0, 1)
+    env.reset(circuit, seed=0)
+    action = next(index for index, candidate in env.action_set.items() if candidate.name == "Opt2qBlocks")
+    try:
+        observation, _, terminated, truncated, _ = env.step(action)
+        assert env.last_result["status"] == "ok", env.last_result.get("error")
+        assert not terminated
+        assert not truncated
+        assert "unitary" not in env.state.count_ops()
+        assert env.layout is None
+        assert Operator(env.state).equiv(Operator(circuit))
+        assert all(np.isfinite(value).all() for value in observation.values())
     finally:
         env.close()
 
@@ -609,7 +660,7 @@ def test_standard_vf2_preserves_outputs(name: str, seed: int, inputs: Inputs, co
 
 @pytest.mark.parametrize("name", ["ghz_19", "bv_13", "qpeinexact_17", "ae_7", "qaoa_19"])
 def test_o3_teacher_replay(name: str, inputs: Inputs, config: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
-    """Replay canonical actions, virtual permutations and repeated synthesis through the real worker."""
+    """Replay the atomic teacher exactly without exposing unitary blocks to the policy."""
     monkeypatch.setattr(inputs, "names", lambda split: [f"{split}/{name}_indep.qasm"])
     env = scasia.make_env("paper", config, inputs)
     try:
@@ -617,14 +668,43 @@ def test_o3_teacher_replay(name: str, inputs: Inputs, config: dict[str, Any], mo
             scasia.NormalizedGNNObservationWrapper(env), 0, config["paper"]["gnn"]["gamma"]
         )
         assert len(report["circuits"]) == 1
+        assert report["pipeline"] == "O3 with atomic block synthesis before layout"
         assert report["transitions"] == len(samples) <= 32
         assert report["circuits"][0]["actions"][-1] == "terminate"
         assert all(value == pytest.approx(report["circuits"][0]["esp"]) for _, _, _, value in samples)
         assert all(mask[action] for _, mask, action, _ in samples)
+        assert all(not trace["after"]["gate_counts"].get("unitary") for trace in env.trace)
         if name == "ae_7":
-            consolidated = next(trace for trace in env.trace if trace["name"] == "ConsolidateBlocks")
-            assert consolidated["after"]["gate_counts"]["unitary"]
-            assert consolidated["after"]["esp_kind"] == "unavailable"
+            assert "Opt2qBlocks" in report["circuits"][0]["actions"]
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize(("name", "failed_layout"), [("ghz_2", False), ("ae_3", True)])
+def test_o3_teacher_layout_feedback(
+    name: str, failed_layout: bool, inputs: Inputs, config: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Expose real failed layout attempts in the teacher's previous-action context."""
+    monkeypatch.setattr(inputs, "names", lambda split: [f"{split}/{name}_indep.qasm"])
+    env = scasia.make_env("paper", config, inputs)
+    try:
+        samples, report = collect_demonstrations(
+            scasia.PreviousActionObservationWrapper(env), 0, 1.0, retain_failed_layouts=True
+        )
+        actions = report["circuits"][0]["actions"]
+        assert report["retain_failed_layouts"]
+        assert actions.count("VF2Layout") == 1
+        index = actions.index("VF2Layout")
+        trace = env.trace[index]
+        assert trace["after"]["state"]["layout"] == (not failed_layout)
+        if failed_layout:
+            assert actions[index + 1] == "QiskitSabreMapping"
+        graph, mask, action, _ = samples[index + 1]
+        previous_action = graph["global_features"][0, -len(env.action_set) :]
+        vf2_index = next(i for i, candidate in env.action_set.items() if candidate.name == "VF2Layout")
+        assert previous_action.sum().item() == 1
+        assert previous_action[vf2_index].item() == 1
+        assert mask[action]
     finally:
         env.close()
 
@@ -883,6 +963,38 @@ def test_physical_barrier_does_not_require_coupling(inputs: Inputs) -> None:
     assert score["esp_kind"] != "exact"
 
 
+def test_unitary_block_observation(inputs: Inputs, config: dict[str, Any]) -> None:
+    """Keep unitary intermediates observable without aborting native compilation."""
+    _, target = load_target(inputs.path)
+    block = QuantumCircuit(2)
+    block.h(0)
+    block.cx(0, 1)
+    circuit = QuantumCircuit(3)
+    circuit.unitary(Operator(block), [0, 1])
+    circuit.swap(1, 2)
+    circuit.measure_all()
+    score = observe(circuit, target, physical=False)
+    assert score["state"] == {"synthesis": False, "layout": False, "routing": False}
+    assert score["depth"] == circuit.depth()
+    assert score["gate_counts"] == dict(circuit.count_ops())
+    assert score["esp"] is None
+    assert score["expected_fidelity"] is None
+    assert score["esp_kind"] == "unavailable"
+    assert score["score_error"] == "ESP proxy does not support unitary blocks."
+
+    worker = CompilerWorker(inputs.path, scasia.worker_settings(config, "qiskit"))
+    try:
+        result = worker.run({"compiler": "qiskit", "circuit": circuit, "seed": 0})
+        assert result["status"] == "ok", result
+        assert result["traces"][0]["before"] == score
+        assert all(entry["status"] == "ok" for entry in result["traces"])
+        assert result["score"]["esp_kind"] == "exact"
+        reference = generate_preset_pass_manager(optimization_level=3, target=target, seed_transpiler=0).run(circuit)
+        assert result["score"]["esp"] == estimated_success_probability(reference, target)
+    finally:
+        worker.close()
+
+
 @pytest.mark.parametrize("multiple_registers", [False, True])
 @pytest.mark.parametrize("num_qubits", [2, 3])
 def test_tket_physical_indices_and_permutation(inputs: Inputs, multiple_registers: bool, num_qubits: int) -> None:
@@ -1016,6 +1128,7 @@ def test_training_save_load_resume(
     refined: bool,
     inputs: Inputs,
     config: dict[str, Any],
+    pretrained_checkpoint: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1028,7 +1141,7 @@ def test_training_save_load_resume(
     if warmstart_epochs or pretrained:
         config["experiment"]["episode_actions"] = 32
     if pretrained:
-        config["paper"]["warmstart"]["checkpoint"] = str(ROOT / "experiments/assets/gnn-context20.zip")
+        config["paper"]["warmstart"]["checkpoint"] = str(pretrained_checkpoint)
         if refined:
             config["paper"]["refinement"] = {
                 "quality_features": True,
@@ -1097,9 +1210,11 @@ def test_training_save_load_resume(
         gc.collect()
 
 
-def test_refinement_observations_rewards_and_teacher(inputs: Inputs, config: dict[str, Any], tmp_path: Path) -> None:
+def test_refinement_observations_rewards_and_teacher(
+    inputs: Inputs, config: dict[str, Any], pretrained_checkpoint: Path, tmp_path: Path
+) -> None:
     """Expose exact ESP, preserve the initial policy, and penalize teacher drift."""
-    config["paper"]["warmstart"].update(checkpoint=str(ROOT / "experiments/assets/gnn-context20.zip"), epochs=0)
+    config["paper"]["warmstart"].update(checkpoint=str(pretrained_checkpoint), epochs=0)
     config["paper"]["refinement"] = {"quality_features": True, "action_cost": 0.0001, "teacher_kl_coefficient": 0.02}
     env = scasia.make_env("paper", config, inputs)
     wrapped = scasia.PreviousActionObservationWrapper(env, quality_features=True)
@@ -1111,7 +1226,7 @@ def test_refinement_observations_rewards_and_teacher(inputs: Inputs, config: dic
         scasia.import_pretrained(model, config, env, manifest)
         wrapped.reset(inputs.circuit("train/ghz_2_indep.qasm"), seed=0)
         graph = wrapped.graph_observation
-        assert graph["global_features"].shape == (1, 84)
+        assert graph["global_features"].shape == (1, 83)
         assert graph["global_features"][0, -2:].tolist() == [0.0, 0.0]
         old_graph = cast("Any", graph).clone()
         old_graph.global_features = old_graph.global_features[:, :-2]
@@ -1148,7 +1263,7 @@ def test_refinement_observations_rewards_and_teacher(inputs: Inputs, config: dic
         })
         assert penalty.on_step()
         assert rewards[0] == pytest.approx(0.5 - 0.02 * (current - reference).item())
-        assert graph["global_features"].shape == (1, 84)
+        assert graph["global_features"].shape == (1, 83)
 
         for name in ("VF2Layout", "BasisTranslator"):
             index = next(i for i, candidate in env.action_set.items() if candidate.name == name)
@@ -1169,10 +1284,11 @@ def test_refinement_observations_rewards_and_teacher(inputs: Inputs, config: dic
 
 
 def test_pretrained_import_preserves_parameters_and_fresh_schedule(
-    inputs: Inputs, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    inputs: Inputs, pretrained_checkpoint: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Import tensors without old Python metadata, then load a portable native checkpoint."""
     config = scasia.resolve_config(ROOT / "experiments/scasia-pretrained.toml")
+    config["paper"]["warmstart"]["checkpoint"] = str(pretrained_checkpoint)
     config["output"] = str(tmp_path)
     config["experiment"]["training_timesteps"] = 0
     checkpoint = Path(config["paper"]["warmstart"]["checkpoint"])
@@ -1212,10 +1328,10 @@ def test_pretrained_import_preserves_parameters_and_fresh_schedule(
 
 @pytest.mark.parametrize("field", ["sha256", "inputs", "actions"])
 def test_pretrained_import_rejects_incompatible_source(
-    field: str, inputs: Inputs, config: dict[str, Any], tmp_path: Path
+    field: str, inputs: Inputs, config: dict[str, Any], pretrained_checkpoint: Path, tmp_path: Path
 ) -> None:
     """Reject a changed model, dataset or action order before starting training."""
-    source = ROOT / "experiments/assets/gnn-context20.zip"
+    source = pretrained_checkpoint
     checkpoint = tmp_path / "source.zip"
     checkpoint.symlink_to(source)
     metadata = json.loads(source.with_suffix(".json").read_text())
@@ -1237,14 +1353,32 @@ def test_pretrained_import_rejects_incompatible_source(
         env.close()
 
 
+def test_pretrained_import_rejects_previous_action_registry(
+    inputs: Inputs, config: dict[str, Any], tmp_path: Path
+) -> None:
+    """The bundled 45-action model cannot initialize the atomic-action registry."""
+    config["paper"]["warmstart"].update(checkpoint=str(ROOT / "experiments/assets/gnn-context20.zip"), epochs=0)
+    config["experiment"]["training_timesteps"] = 0
+    env = scasia.make_env("paper", config, inputs)
+    manifest = {"identity": scasia.run_identity(config, inputs, env, "paper")}
+    try:
+        with pytest.raises(ValueError, match="Pretrained checkpoint differs"):
+            scasia.train("paper", config, env, tmp_path, manifest, resume=False)
+        assert not (tmp_path / "checkpoint.zip").exists()
+    finally:
+        env.close()
+
+
 @pytest.mark.model_training
+@pytest.mark.parametrize("previous_action", [False, True])
 def test_imitation_only_resume(
-    inputs: Inputs, config: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    previous_action: bool, inputs: Inputs, config: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Recover an interrupted imitation phase without counting its updates as PPO steps."""
-    config["experiment"].update(training_timesteps=0)
+    config["experiment"].update(training_timesteps=0, evaluation_repetitions=1)
+    config["paper"]["previous_action"] = previous_action
     config["paper"]["warmstart"].update(epochs=10, batch_size=4)
-    monkeypatch.setattr(inputs, "names", lambda split: [f"{split}/ghz_2_indep.qasm"])
+    monkeypatch.setattr(inputs, "names", lambda split: [f"{split}/{'ghz' if split == 'train' else 'bv'}_2_indep.qasm"])
     env = scasia.make_env("paper", config, inputs)
     manifest: dict[str, Any] = {
         "identity": scasia.run_identity(config, inputs, env, "paper"),
@@ -1270,6 +1404,14 @@ def test_imitation_only_resume(
         assert manifest["warmstart"]["epochs"][-1]["loss"] < manifest["warmstart"]["epochs"][0]["loss"]
         assert manifest["checkpoints"]["warmstart"]["warmstart_epochs"] == 10
         assert (tmp_path / "final.zip").is_file()
+        model = scasia.GNNMaskablePPO.load(tmp_path / "final.zip")
+        assert getattr(model.policy.features_extractor, "action_count", None) == (
+            len(env.action_set) if previous_action else None
+        )
+        scasia.evaluate("paper", config, env, tmp_path, manifest, resume=False)
+        records = [json.loads(line) for line in (tmp_path / "evaluation.jsonl").read_text().splitlines()]
+        assert len(records) == 1
+        assert records[0]["status"] == "ok"
     finally:
         env.close()
         for checkpoint in tmp_path.glob("*.zip"):

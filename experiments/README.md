@@ -20,12 +20,46 @@ concurrent writers. Paths are relative to the TOML file. Do not set
 `GITHUB_ACTIONS`: the shared BQSKit actions use reduced settings under that
 flag.
 
-The checked-in configuration starts a fresh `gnn-warmstart-v3` run below
-`../../scasia-runs`, relative to the TOML file. The paper row trains and
-evaluates in `gnn-warmstart-v3/paper`. Use this new output directory after
-updating; do not resume a v1 or v2 checkpoint with the changed reward and masks.
+Set `output` to a fresh directory before training, for example
+`../../scasia-runs/gnn-atomic-v1`. Both RL rows now have 44 actions after
+removing standalone `ConsolidateBlocks`. Previous checkpoints, including the
+bundled 20-epoch GNN, have 45 actions and cannot be imported or resumed. Use
+`scasia.toml` to generate fresh demonstrations and train a new model.
 
-## Continue the pretrained GNN
+## Fresh teacher experiment (v7)
+
+`scasia-atomic-v7.toml` trains fresh weights for eight imitation epochs on all
+321 training circuits, then evaluates all 41 test circuits ten times each. It
+writes to `../../scasia-runs/gnn-atomic-v7/paper`. PPO is disabled for this
+first assessment. The dataset, Boston calibration, 32-action limit, 60-second
+action timeout, and seeds remain unchanged.
+
+```sh
+tmux new -s scasia-v7
+uv run --no-sync python -u -m mqt.predictor.rl.experiments.scasia --compiler paper --config experiments/scasia-atomic-v7.toml --stage all
+```
+
+Detach with `Ctrl-b`, then `d`. Reconnect with `tmux attach -t scasia-v7`. After
+an interruption, rerun the Python command with `--resume`.
+
+`paper.previous_action = true` retains the later prototype's previous-action
+inputs during fresh training and evaluation. It also retains actual failed VF2
+layout searches in the teacher demonstrations, so the policy can observe the
+attempt before choosing SABRE. Successful layouts appear once; skipped searches
+are not inserted. Each replay still checks the final circuit, layout and ESP.
+This run has 37 normalized global features plus 44 previous-action indicators.
+It starts with context inputs from epoch one and excludes no training circuits;
+the historical context model added those inputs partway through training. The v6
+quality inputs, action cost, and KL penalty are not enabled in this teacher-only
+run. Assess its evaluation before preparing PPO continuation; changing the
+training budget is not a valid `--resume` of this run.
+
+## Historical pretrained GNN
+
+The following recipes and results describe the 45-action implementation through
+commit `c29f0392`. Keep those runs on their recorded revision. The bundled
+checkpoint and pretrained configurations are retained for that reproduction;
+they are incompatible with the current action space.
 
 `scasia-pretrained.toml` starts PPO from the bundled 20-epoch model in a new
 `../../scasia-runs/gnn-pretrained-v4/paper` directory. Run inside `tmux` on the
@@ -111,11 +145,11 @@ Defaults are ESP, 100,000 requested training steps, 32 actions per episode, seed
 stochastically with a recorded seed for each repetition. Every repetition is
 retained; there is no best-of-N policy selection. The native TKET pipeline
 retains its fixed LightSABRE seed 0; shared BQSKit actions retain seed 10.
-Qiskit uses the repetition seed. The Qiskit actions used by the teacher use O3's
-SDK parameters, including `QiskitSabreMapping`'s search budget and VF2 settings,
-with one compilation seed per episode. The separate `SabreSwap` action retains
-its shared implementation. This aligns the teacher's primitives with the native
-reference; it does not add an outer best-of-N compilation selection.
+Qiskit uses the repetition seed. The teacher's layout and routing actions use
+O3's SDK parameters, including `QiskitSabreMapping`'s search budget and VF2
+settings, with one compilation seed per episode. The separate `SabreSwap` action
+retains its shared implementation. This aligns the teacher's primitives with the
+native reference; it does not add an outer best-of-N compilation selection.
 
 Both RL rows exclude `QiskitO3`. They expose
 `Optimize1qGatesDecomposition_preserve` and `Opt2qBlocks_preserve` as separate
@@ -125,19 +159,24 @@ directory; existing checkpoints cannot be resumed with this action set. The
 paper graph input also keeps normalized qubit count and depth instead of
 overwriting them with raw values. This input change requires fresh training too.
 
-Both RL rows additionally expose canonical `ConsolidateBlocks` and
-`TwoQubitPeepholeOptimization`. `ElidePermutations` removes virtual swaps
-without committing to a physical layout. Its output permutation survives
-subsequent mapping. `VF2PostLayout_2q` is the SDK's standard configuration
-before translation; `VF2PostLayout` is its configuration for native gates. The
-paper mask allows the former on routed physical circuits before synthesis.
-Qiskit's native graph is kept inside the worker between actions: rebuilding it
-can change later synthesis choices even when the rebuilt circuit is equivalent.
-Before layout, TKET optimization uses one quantum register to preserve logical
-wire order. When an SDK conversion renames logical qubits, the worker translates
-retained virtual-permutation metadata to the new names before mapping.
-Intermediate consolidated unitary blocks have unavailable proxy rewards; final
-scores still use the shared ESP calculation.
+Both RL rows expose `TwoQubitPeepholeOptimization`. The existing `Opt2qBlocks`
+action collects, consolidates, and synthesizes blocks in one action, including
+decomposition of any remaining unitary blocks. Standalone `ConsolidateBlocks` is
+absent: the policy receives ordinary gates after the whole action completes.
+`ElidePermutations` removes virtual swaps without committing to a physical
+layout. Its output permutation survives subsequent mapping. `VF2PostLayout_2q`
+is the SDK's standard configuration before translation; `VF2PostLayout` is its
+configuration for native gates. The paper mask allows the former on routed
+physical circuits before synthesis. Qiskit's native graph is kept inside the
+worker between actions: rebuilding it can change later synthesis choices even
+when the rebuilt circuit is equivalent. Before layout, TKET optimization uses
+one quantum register to preserve logical wire order. When an SDK conversion
+renames logical qubits, the worker translates retained virtual-permutation
+metadata to the new names before mapping. Internal pass traces mark
+unitary-block scores unavailable; final scores still use the shared ESP
+calculation. BQSKit actions require measurements to be terminal on each qubit.
+The mask and execution guard reject later operations on a measured qubit,
+including such outputs from another compiler.
 
 The paper mask follows v3's compilation stages: broad optimization before
 layout, then optimizations that preserve layout, routing, and the native gate
@@ -173,21 +212,27 @@ layer.
 ### O3 demonstrations and warm start
 
 `paper.warmstart` defaults to five imitation epochs with batches of eight
-graphs. Before fitting, the runner compiles all 321 training circuits with
-native O3 and replays its accepted individual actions through the actual
-environment. It omits no-ops and suffixes that O3 itself rolled back. Layout
-bookkeeping stays attached to the relevant canonical action. The replay must fit
-the configured episode limit, obey the action masks, and reproduce the final
+graphs. Before fitting, the runner compiles all 321 training circuits with an O3
+variant that replaces initial block consolidation with the complete
+`Opt2qBlocks` action before layout. Native O3 can retain unitary blocks through
+layout; this variant can therefore produce different circuits and scores. The
+Qiskit baseline remains native O3.
+
+The runner replays the variant's accepted actions through the actual
+environment, omitting no-ops and rolled-back suffixes. Layout bookkeeping stays
+attached to the relevant canonical action. The replay must fit the configured
+episode limit, obey the action masks, and exactly reproduce the variant's final
 circuit, logical-output mapping, and ESP. Any mismatch stops training; no
 circuit is silently excluded. The evaluation split supplies no demonstrations.
 
 The GNN learns masked action labels and discounted demonstration returns, then
 continues with ordinary PPO rollouts. The teacher is never called during RL
-evaluation. `teacher.json` records each verified sequence, reference score,
-native pass count, and runtime. The manifest records imitation losses, training
-action accuracy, and separate demonstration/fit costs. Imitation is additional
-training work; its transitions are not counted as PPO timesteps. The five-epoch
-default is an initial setting, not a claim that the learned policy matches O3.
+evaluation. `teacher.json` identifies the atomic teacher variant and records
+each verified sequence, reference score, pass count, and runtime. The manifest
+records imitation losses, training action accuracy, and separate
+demonstration/fit costs. Imitation is additional training work; its transitions
+are not counted as PPO timesteps. The five-epoch default is an initial setting,
+not a claim that the learned policy matches O3.
 
 Configured dropout applies during imitation. PPO disables dropout during both
 rollout collection and updates so unchanged weights produce the same action

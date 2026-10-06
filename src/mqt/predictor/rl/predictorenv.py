@@ -711,6 +711,7 @@ class PredictorEnv(Env):
             elif action.origin == CompilationOrigin.BQSKIT:
                 action_mask.append(
                     is_bqskit_action_available(
+                        circuit=self.state,
                         has_parameterized_gates=self.has_parameterized_gates,
                     )
                 )

@@ -451,7 +451,12 @@ def _worker_main(connection: Connection, assets: Path, settings: dict[str, Any])
             else:
                 with observe_qiskit_passes(observer):
                     if mode == "teacher":
-                        result, extra["teacher_actions"] = demonstration(circuit, target, request["seed"])
+                        result, extra["teacher_actions"] = demonstration(
+                            circuit,
+                            target,
+                            request["seed"],
+                            retain_failed_layouts=request.get("retain_failed_layouts", False),
+                        )
                     elif mode == "qiskit":
                         result = generate_preset_pass_manager(
                             optimization_level=3, target=target, seed_transpiler=request["seed"]
