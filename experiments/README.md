@@ -427,3 +427,55 @@ For a local smoke run, use a separate output directory, small matching
 `n_steps`/`batch_size`/ `checkpoint_steps`, a small training budget, one
 repetition, and `evaluation_circuits = 1`. Full cluster experiments are a
 separate execution step.
+
+## Native pipeline editor prototype
+
+The editor starts from actual SDK presets: Qiskit O3, offline IBM TKET O2, and
+BQSKit's default level 1 (optionally level 2). `KEEP` runs native stage objects
+with their original parameters, control flow, and mapping state. Unlike the
+earlier atomic-action teacher, Qiskit's initial synthesis is unchanged. BQSKit
+retains native synthesis tolerances; repeated native runs can produce equivalent
+numeric gate parameters, so byte-identical output is not guaranteed.
+
+Run an unchanged preset on explicitly selected frozen circuits:
+
+```bash
+uv run --no-sync python -m mqt.predictor.rl.experiments.pipeline_editor \
+  --compiler qiskit --config experiments/scasia.toml \
+  --output ../../scasia-runs/editor-qiskit-keep \
+  --circuit train/qft_3_indep.qasm train/ae_3_indep.qasm --seed 0 7
+```
+
+Change `--compiler` to `tket` or `bqskit` and use a fresh output directory.
+Paths passed to `--output` are relative to the working directory. Optional edits
+use `--edit INDEX:SKIP` or `--edit INDEX:REPEAT`; repeat adds one invocation.
+Unmentioned stages keep their native behavior.
+
+| Preset                              | Editable stage indices                                                                                                             |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Qiskit O3                           | `4`: complete native optimization stage                                                                                            |
+| TKET O2                             | `1`: FullPeepholeOptimise; `4`: KAKDecomposition; `5`: CliffordSimp; `6`: SynthesiseTket; `8`: AutoSquash; `9`: RemoveRedundancies |
+| BQSKit level 1                      | None; unchanged reference workflow                                                                                                 |
+| BQSKit level 2 (`--bqskit-level 2`) | `8`: Gate Deletion Optimization                                                                                                    |
+
+For example, append `--edit 4:SKIP` to the Qiskit command and select a new
+output directory. Mapping, rebasing, measurements, and native setup remain
+mandatory. TKET retains its native LightSABRE seed 0 and 50 attempts; `--seed`
+controls Qiskit and BQSKit. BQSKit uses the same target connectivity and gate
+set, but its native model does not use Boston's calibration errors. All final
+circuits use the shared calibration for ESP scoring.
+
+`manifest.json` records code, dependencies, inputs, and settings.
+`results.jsonl` retains every compilation, final score, physical output map,
+stage decisions, counts, timing, failures, and timeouts. This prototype uses
+60-second deadlines per Qiskit internal pass or per TKET/BQSKit top-level stage,
+as configured by `[worker]`. BQSKit runtime ports default to 37472/37474; set
+`--bqskit-port` and `--bqskit-worker-port` for concurrent editor jobs.
+
+`compilation_seconds` includes editor overhead, conversion, and BQSKit runtime
+startup, but excludes final ESP scoring. BQSKit's separate stage submissions add
+overhead compared with its single native workflow submission. Stage counts are
+not comparable pass counts across SDKs. Intermediate ESP and PPE are not
+computed here. The three adapter APIs accept a `policy(state)` callback with the
+compiler, stage, allowed actions, and current circuit counts. This version uses
+explicit edits; no GNN, transformer, or RL training is included.

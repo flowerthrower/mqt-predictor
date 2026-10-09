@@ -1,0 +1,173 @@
+# Copyright (c) 2023 - 2026 Chair for Design Automation, TUM
+# Copyright (c) 2025 - 2026 Munich Quantum Software Company GmbH
+# All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
+# Licensed under the MIT License
+
+"""Focused parity and validity checks for native TKET pipeline edits."""
+
+from __future__ import annotations
+
+import json
+from collections import defaultdict
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+import numpy as np
+import pytest
+from pytket import Circuit
+from pytket.extensions.qiskit import IBMQBackend, qiskit_to_tk
+from pytket.passes import SequencePass
+from pytket.predicates import CompilationUnit
+from qiskit import ClassicalRegister, QuantumCircuit, QuantumRegister
+from qiskit.quantum_info import Statevector
+
+from mqt.predictor.rl.experiments.inputs import load_target
+from mqt.predictor.rl.experiments.metrics import observe
+from mqt.predictor.rl.experiments.pipeline_tket import compile_tket, features, run_tket
+from mqt.predictor.rl.experiments.worker import tket_physical_circuit
+
+if TYPE_CHECKING:
+    from qiskit.transpiler import Target
+
+    from mqt.predictor.rl.experiments.inputs import FrozenBoston
+
+ASSETS = Path(__file__).resolve().parents[2] / "experiments/assets"
+
+
+@pytest.fixture(scope="module")
+def backend_target() -> tuple[FrozenBoston, Target]:
+    """Use the shared offline Boston target and calibration."""
+    return load_target(ASSETS)
+
+
+def measured_circuit(multiple_registers: bool) -> QuantumCircuit:
+    """Exercise output permutations and non-alphabetical register order."""
+    circuit = (
+        QuantumCircuit(
+            QuantumRegister(1, "z"),
+            QuantumRegister(2, "a"),
+            ClassicalRegister(3, "out"),
+        )
+        if multiple_registers
+        else QuantumCircuit(3, 3)
+    )
+    circuit.h(0)
+    circuit.cx(0, 2)
+    circuit.ry(0.31, 1)
+    circuit.cx(2, 1)
+    circuit.swap(0, 1)
+    circuit.measure(range(3), [2, 0, 1])
+    return circuit
+
+
+def classical_distribution(circuit: QuantumCircuit) -> dict[tuple[int, ...], float]:
+    """Sum exact measurement branches, including gates after measurements."""
+    wires = sorted({circuit.find_bit(qubit).index for instruction in circuit.data for qubit in instruction.qubits})
+    compact = {physical: index for index, physical in enumerate(wires)}
+    branches = [(Statevector.from_int(0, 2 ** len(wires)), (0,) * circuit.num_clbits)]
+    for instruction in circuit.data:
+        qubits = [compact[circuit.find_bit(qubit).index] for qubit in instruction.qubits]
+        if instruction.operation.name != "measure":
+            branches = [(state.evolve(instruction.operation, qubits), bits) for state, bits in branches]
+            continue
+        bit = circuit.find_bit(instruction.clbits[0]).index
+        measured = []
+        for state, bits in branches:
+            for outcome in (0, 1):
+                amplitudes = state.data.copy()
+                amplitudes[((np.arange(len(amplitudes)) >> qubits[0]) & 1) != outcome] = 0
+                measured.append((Statevector(amplitudes), (*bits[:bit], outcome, *bits[bit + 1 :])))
+        branches = measured
+    result = defaultdict(float)
+    for state, bits in branches:
+        result[bits] += float(np.vdot(state.data, state.data).real)
+    return dict(result)
+
+
+def test_features_count_gates_without_barriers() -> None:
+    """Policy features must not count two-wire barriers as entangling gates."""
+    circuit = Circuit(2).CX(0, 1).add_barrier([0, 1])
+    assert features(circuit)["two_qubit_gates"] == 1
+
+
+@pytest.mark.parametrize("multiple_registers", [False, True])
+def test_keep_matches_native_circuit_maps_and_measurements(
+    backend_target: tuple[FrozenBoston, Target], multiple_registers: bool
+) -> None:
+    """KEEP must preserve the native preset's circuit, maps and score."""
+    backend, target = backend_target
+    circuit = measured_circuit(multiple_registers)
+    expected = CompilationUnit(qiskit_to_tk(circuit))
+    pipeline = IBMQBackend.default_compilation_pass_offline(
+        backend.configuration(), backend.properties(), optimisation_level=2
+    )
+    pipeline.apply(expected)
+    actual, unit, trace = compile_tket(circuit, backend)
+    reference = tket_physical_circuit(expected, circuit)
+
+    assert unit.circuit == expected.circuit
+    assert unit.initial_map == expected.initial_map
+    assert unit.final_map == expected.final_map
+    assert actual == reference
+    assert actual.layout is not None
+    assert reference.layout is not None
+    assert actual.layout.initial_index_layout() == reference.layout.initial_index_layout()
+    assert actual.layout.final_index_layout() == reference.layout.final_index_layout()
+    assert observe(actual, target, physical=True) == observe(reference, target, physical=True)
+    assert len(trace) == 10
+    assert all(entry["action"] == "KEEP" for entry in trace)
+    json.dumps(trace, allow_nan=False)
+
+
+@pytest.mark.parametrize("action", ["SKIP", "REPEAT"])
+def test_optional_edits_preserve_native_validity_and_measurement_semantics(
+    backend_target: tuple[FrozenBoston, Target], action: str
+) -> None:
+    """SKIP and REPEAT retain connectivity, basis and measurement outcomes."""
+    backend, target = backend_target
+    circuit = measured_circuit(True)
+    seen = []
+
+    def policy(state: dict[str, Any]) -> str:
+        seen.append(state)
+        return action if action in state["allowed_actions"] else "KEEP"
+
+    events = []
+    actual, unit, trace = compile_tket(circuit, backend, policy, on_event=events.append)
+    assert len(seen) == 10
+    assert all(entry["action"] == "KEEP" for entry in trace if len(entry["allowed_actions"]) == 1)
+    assert len([entry for entry in trace if entry["occurrence"] is not None]) == (4 if action == "SKIP" else 16)
+    assert len(events) == 2 * len(trace)
+    for entry, before_event, after_event in zip(trace, events[::2], events[1::2], strict=True):
+        assert before_event == {**{key: value for key, value in entry.items() if key != "after"}, "event": "before"}
+        assert after_event == {**entry, "event": "after"}
+    assert observe(actual, target, physical=True)["esp_kind"] == "exact"
+    assert all(
+        target.instruction_supported(
+            operation_name=instruction.operation.name,
+            qargs=tuple(actual.find_bit(qubit).index for qubit in instruction.qubits),
+        )
+        for instruction in actual.data
+    )
+
+    assert classical_distribution(actual) == pytest.approx(classical_distribution(circuit), abs=1e-10)
+    assert unit.final_map
+
+
+def test_mapping_stage_cannot_be_skipped(backend_target: tuple[FrozenBoston, Target]) -> None:
+    """Reject a policy decision that removes required mapping."""
+    backend, _ = backend_target
+    pipeline = IBMQBackend.default_compilation_pass_offline(
+        backend.configuration(), backend.properties(), optimisation_level=2
+    )
+    assert isinstance(pipeline, SequencePass)
+    unit = CompilationUnit(qiskit_to_tk(measured_circuit(False)))
+    with pytest.raises(ValueError, match="CustomPassMap"):
+        run_tket(
+            unit,
+            pipeline,
+            lambda state: "SKIP" if state["stage_name"] == "CustomPassMap" else "KEEP",
+        )

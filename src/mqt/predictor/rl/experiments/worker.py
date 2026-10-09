@@ -448,6 +448,10 @@ def _worker_main(connection: Connection, assets: Path, settings: dict[str, Any])
                 result._layout = env.layout  # ruff: ignore[private-member-access]
                 observer.physical = env.layout is not None
                 observer.end(entry, result)
+            elif mode == "pipeline_editor":
+                from .pipeline_editor import compile_pipeline  # ruff: ignore[import-outside-top-level] -- reuses this module's worker and mapping helpers.
+
+                result, extra = compile_pipeline(request, backend, target, settings, connection)
             else:
                 with observe_qiskit_passes(observer):
                     if mode == "teacher":
