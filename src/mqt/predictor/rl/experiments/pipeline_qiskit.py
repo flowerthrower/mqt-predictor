@@ -10,21 +10,23 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from qiskit.passmanager.base_tasks import Task
 from qiskit.transpiler import PassManager
 from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 
+from .pipeline_actions import PipelineActions
+
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from qiskit import QuantumCircuit
     from qiskit.dagcircuit import DAGCircuit
     from qiskit.passmanager.compilation_status import PassManagerState
     from qiskit.transpiler import Target
 
-
-Policy = Callable[[dict[str, Any]], str]
+    from .pipeline_actions import Policy
 
 
 def features(dag: DAGCircuit) -> dict[str, Any]:
@@ -55,7 +57,7 @@ class _OptimizationDecision(Task):
     ) -> None:
         """Retain the native stage and its policy and observation hooks."""
         self.native = native
-        self.policy = policy
+        self.actions = PipelineActions(policy)
         self.trace = trace
         self.seed = seed
         self.on_event = on_event
@@ -66,40 +68,37 @@ class _OptimizationDecision(Task):
         state: PassManagerState,
         callback: Callable | None = None,
     ) -> tuple[DAGCircuit, PassManagerState]:
-        """Choose the number of executions without rebuilding the native controller."""
-        before = features(passmanager_ir)
-        policy_state = {
-            "compiler": "qiskit",
-            "stage_index": 4,
+        """Apply bounded edits without rebuilding the native controller."""
+        invocation = 0
+        stage = {
             "stage_name": "optimization",
             "stage_config": {"optimization_level": 3, "seed_transpiler": self.seed},
-            "allowed_actions": ["KEEP", "SKIP", "REPEAT"],
-            "before": before,
         }
-        decision = "KEEP" if self.policy is None else self.policy(policy_state)
-        executions = {"SKIP": 0, "KEEP": 1, "REPEAT": 2}
-        if decision not in executions:
-            msg = f"Unknown optimization decision: {decision!r}"
-            raise ValueError(msg)
-        for index in range(max(1, executions[decision])):
+        while True:
+            policy_state = {"compiler": "qiskit", "stage_index": 4, **stage, "before": features(passmanager_ir)}
+            decision = self.actions.decide(policy_state, optional=True, insertions={4: stage}, can_end=True)
+            execute = decision not in {"SKIP", "END"}
             entry = {
                 **policy_state,
                 "action": decision,
-                "occurrence": index if executions[decision] else None,
-                "before": before,
+                "occurrence": invocation if execute else None,
             }
+            if decision.startswith("INSERT:"):
+                entry["inserted_stage_index"] = 4
             if self.on_event is not None:
                 self.on_event({**entry, "event": "before"})
-            if index:
-                # A requested repeat must rerun analyses as well as transformations.
-                state.workflow_status.completed_passes.clear()
-            if executions[decision]:
+            if execute:
+                if invocation:
+                    # Each invocation must rerun analyses as well as transformations.
+                    state.workflow_status.completed_passes.clear()
                 passmanager_ir, state = self.native.execute(passmanager_ir, state, callback)
+                invocation += 1
             entry["after"] = features(passmanager_ir)
             self.trace.append(entry)
             if self.on_event is not None:
                 self.on_event({**entry, "event": "after"})
-            before = entry["after"]
+            if not decision.startswith("INSERT:"):
+                break
         return passmanager_ir, state
 
 
@@ -112,11 +111,11 @@ def run_native_qiskit(
     callback: Callable | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[QuantumCircuit, list[dict[str, Any]]]:
-    """Run native O3 with one KEEP/SKIP/REPEAT decision before optimization.
+    """Run native O3 with KEEP/SKIP/INSERT/END at the optimization boundary.
 
-    KEEP executes the original stage once. REPEAT executes that same controller
-    twice on the evolving DAG and property set, invalidating the completed-pass
-    cache between executions. Neither choice rewrites native passes or loops.
+    INSERT:4 runs the original optimization controller before the next decision.
+    END skips optimization while retaining native finalization. The shared DAG,
+    property set, native passes, and conditional loops remain intact.
     """
     preset = generate_preset_pass_manager(3, target=target, seed_transpiler=seed)
     trace: list[dict[str, Any]] = []

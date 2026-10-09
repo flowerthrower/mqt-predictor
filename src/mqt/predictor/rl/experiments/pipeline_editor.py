@@ -30,6 +30,7 @@ from mqt.predictor.rl.actions.bqskit_actions import (
 )
 
 from .inputs import Inputs, digest
+from .pipeline_actions import MAX_EDITS
 from .pipeline_bqskit import compile_bqskit
 from .pipeline_qiskit import run_native_qiskit
 from .pipeline_tket import compile_tket
@@ -46,25 +47,32 @@ if TYPE_CHECKING:
 class EditPolicy:
     """Apply explicit stage edits; unmentioned stages retain native behavior."""
 
-    def __init__(self, edits: dict[int, str]) -> None:
+    def __init__(self, edits: dict[int, list[str]]) -> None:
         """Keep stage indices local to one selected native preset."""
         self.edits = edits
         self.seen: set[int] = set()
+        self.consumed: dict[int, int] = {}
 
     def __call__(self, state: dict[str, Any]) -> str:
         """Use the same state interface that a learned policy can consume."""
         index = state["stage_index"]
         self.seen.add(index)
-        action = self.edits.get(index, "KEEP")
+        position = self.consumed.get(index, 0)
+        actions = self.edits.get(index, [])
+        action = actions[position] if position < len(actions) else "KEEP"
         if action not in state["allowed_actions"]:
             msg = f"Invalid {action!r} for stage {index}:{state['stage_name']}."
             raise ValueError(msg)
+        self.consumed[index] = position + 1
         return action
 
     def validate(self) -> None:
         """Reject typos instead of silently executing an unedited baseline."""
         if missing := self.edits.keys() - self.seen:
             msg = f"Unknown editable stage indices: {sorted(missing)}"
+            raise ValueError(msg)
+        if unused := [index for index, actions in self.edits.items() if self.consumed.get(index, 0) < len(actions)]:
+            msg = f"Unconsumed edits at stage indices: {unused}"
             raise ValueError(msg)
 
 
@@ -158,18 +166,32 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--circuit", nargs="+", required=True, help="Exact archive names, e.g. train/qft_3_indep.qasm")
     parser.add_argument("--seed", nargs="+", type=int, default=[0])
-    parser.add_argument("--edit", action="append", default=[], help="STAGE_INDEX:SKIP or STAGE_INDEX:REPEAT")
+    parser.add_argument(
+        "--edit", action="append", default=[], help="INDEX:SKIP, INDEX:END, or INDEX:INSERT:NATIVE_STAGE_INDEX"
+    )
     parser.add_argument("--bqskit-level", type=int, choices=(1, 2, 3), default=1)
     parser.add_argument("--tket-level", type=int, choices=(2, 3), default=2)
     parser.add_argument("--bqskit-port", type=int, default=37472)
     parser.add_argument("--bqskit-worker-port", type=int, default=37474)
     args = parser.parse_args()
-    edits: dict[int, str] = {}
+    edits: dict[int, list[str]] = {}
     for edit in args.edit:
-        index, action = edit.split(":")
-        if action not in {"KEEP", "SKIP", "REPEAT"} or int(index) in edits:
-            parser.error(f"Invalid or repeated stage edit: {edit}")
-        edits[int(index)] = action
+        index, separator, action = edit.partition(":")
+        if (
+            not separator
+            or not index.isdecimal()
+            or (
+                action not in {"KEEP", "SKIP", "END"}
+                and not (action.startswith("INSERT:") and action.removeprefix("INSERT:").isdecimal())
+            )
+        ):
+            parser.error(f"Invalid stage edit: {edit}")
+        actions = edits.setdefault(int(index), [])
+        if actions and not actions[-1].startswith("INSERT:"):
+            parser.error(f"Only INSERT allows another decision at the same stage: {edit}")
+        actions.append(action)
+    if sum(action != "KEEP" for actions in edits.values() for action in actions) > MAX_EDITS:
+        parser.error(f"At most {MAX_EDITS} edits are allowed per compilation.")
     config = tomllib.loads(args.config.read_text())
     inputs = Inputs((args.config.resolve().parent / config["assets"]).resolve())
     for name in args.circuit:
@@ -195,6 +217,7 @@ def main() -> None:
         "circuits": args.circuit,
         "seeds": args.seed,
         "edits": edits,
+        "max_edits": MAX_EDITS,
         "bqskit_level": args.bqskit_level,
         "tket_level": args.tket_level,
         "tket_greedy_thread_timeout_seconds": 300 if args.compiler == "tket" and args.tket_level == 3 else None,

@@ -449,8 +449,22 @@ uv run --no-sync python -m mqt.predictor.rl.experiments.pipeline_editor \
 
 Change `--compiler` to `tket` or `bqskit` and use a fresh output directory.
 Paths passed to `--output` are relative to the working directory. Optional edits
-use `--edit INDEX:SKIP` or `--edit INDEX:REPEAT`; repeat adds one invocation.
-Unmentioned stages keep their native behavior.
+use the four actions below. Each compilation has a budget of **two edits**.
+Unmentioned stages use `KEEP`.
+
+| Action     | Behavior                                                                   | Edit cost |
+| ---------- | -------------------------------------------------------------------------- | --------- |
+| `KEEP`     | Execute the next native stage and advance.                                 | 0         |
+| `SKIP`     | Omit one optional stage and advance.                                       | 1         |
+| `INSERT:N` | Execute configured native stage `N`, then decide again at the same cursor. | 1         |
+| `END`      | Skip remaining optional work; execute every required stage.                | 1         |
+
+For example, `--edit 4:INSERT:4` repeats Qiskit's optimization stage: the
+insertion executes first, then the default `KEEP` executes it again.
+`--edit 4:INSERT:4 --edit 4:END` executes that stage once and ends optional
+work. Multiple insertions at one cursor follow command-line order. At zero
+remaining edits, only `KEEP` is available. After `END`, the mandatory tail runs
+automatically, and its full runtime is charged.
 
 | Preset                              | Editable stage indices                                                                                                             |
 | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
@@ -458,8 +472,18 @@ Unmentioned stages keep their native behavior.
 | TKET O2                             | `1`: FullPeepholeOptimise; `4`: KAKDecomposition; `5`: CliffordSimp; `6`: SynthesiseTket; `8`: AutoSquash; `9`: RemoveRedundancies |
 | BQSKit level 1                      | None; unchanged reference workflow                                                                                                 |
 | BQSKit level 2 (`--bqskit-level 2`) | `8`: Gate Deletion Optimization                                                                                                    |
-| TKET O3 (`--tket-level 3`)          | `6`: SynthesiseTket; `8`: AutoSquash; `9`: RemoveRedundancies                                                                      |
-| BQSKit level 3 (`--bqskit-level 3`) | None; unchanged reference workflow                                                                                                 |
+| TKET O3 (`--tket-level 3`)          | `3`: GreedyPauliSimp; `6`: SynthesiseTket; `8`: AutoSquash; `9`: RemoveRedundancies                                                |
+| BQSKit level 3 (`--bqskit-level 3`) | `7`: Iterative Resynthesis Optimization; `9`: Iterative Gate Deletion Optimization                                                 |
+
+Insertions use only configured stages from the **selected native preset**.
+Qiskit exposes its complete optimization controller at cursor 4, preserving
+conditional loops. TKET permits optional stages within the same consecutive
+optimization block, including immediately before its required closing stage; SDK
+preconditions must also hold. This keeps preprocessing before routing and
+retains required gate conversion after synthesis. BQSKit permits resynthesis
+between post-routing multi-qudit retargeting and single-qudit retargeting, and
+gate deletion after single-qudit retargeting but before error checking and
+placement. There is no insertion across compiler libraries.
 
 For example, append `--edit 4:SKIP` to the Qiskit command and select a new
 output directory. Mapping, rebasing, measurements, and native setup remain
@@ -481,7 +505,11 @@ overhead compared with its single native workflow submission. Stage counts are
 not comparable pass counts across SDKs. Intermediate ESP and PPE are not
 computed here. The three adapter APIs accept a `policy(state)` callback with the
 compiler, stage, allowed actions, and current circuit counts. This version uses
-explicit edits; no GNN, transformer, or RL training is included.
+explicit edits; no GNN, transformer, or RL training is included. Policy states
+also expose native insertion candidates and the remaining edit budget. Traces
+distinguish inserted stage indices, explicit decisions, and automatic work after
+`END`. These are stage edits; composite native stages retain their internal
+passes and control flow.
 
 To run the native high-optimization presets without any edits or learned policy:
 

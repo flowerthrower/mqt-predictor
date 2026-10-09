@@ -106,8 +106,11 @@ def test_ae8_native_keep_does_not_use_modified_atomic_teacher(frozen_inputs: tup
     assert circuit_to_dag(actual) != circuit_to_dag(modified_teacher)
 
 
-@pytest.mark.parametrize("decision", ["KEEP", "SKIP", "REPEAT"])
-def test_edits_preserve_unitary_and_measurement_wiring(decision: str) -> None:
+@pytest.mark.parametrize(
+    "decisions",
+    [("KEEP",), ("SKIP",), ("END",), ("INSERT:4", "KEEP"), ("INSERT:4", "INSERT:4", "KEEP")],
+)
+def test_edits_preserve_unitary_and_measurement_wiring(decisions: tuple[str, ...]) -> None:
     """Optional edits preserve semantics and physical output indices."""
     target = GenericBackendV2(
         4,
@@ -123,25 +126,33 @@ def test_edits_preserve_unitary_and_measurement_wiring(decision: str) -> None:
     circuit.swap(0, 2)
     circuit.measure([0, 1, 2, 3], [2, 0, 3, 1])
     calls = []
+    actions = iter(decisions)
 
     def policy(state: dict[str, Any]) -> str:
         calls.append(state)
-        return decision
+        return next(actions)
 
     events = []
     compiled, trace = editor.run_native_qiskit(circuit, target, 7, policy, on_event=events.append)
-    assert len(calls) == 1
+    assert len(calls) == len(decisions)
     assert calls[0]["compiler"] == "qiskit"
     assert calls[0]["stage_name"] == "optimization"
-    assert calls[0]["allowed_actions"] == ["KEEP", "SKIP", "REPEAT"]
-    assert len(trace) == (2 if decision == "REPEAT" else 1)
+    assert set(calls[0]["allowed_actions"]) == {"KEEP", "SKIP", "INSERT:4", "END"}
+    assert calls[0]["insertion_candidates"][4]["stage_name"] == "optimization"
+    assert len(trace) == len(decisions)
     assert [event["event"] for event in events] == ["before", "after"] * len(trace)
-    assert trace[0]["occurrence"] == (None if decision == "SKIP" else 0)
-    if decision == "REPEAT":
-        assert trace[1]["occurrence"] == 1
-        assert trace[1]["before"] == trace[0]["after"]
-    if decision == "SKIP":
-        assert trace[0]["before"] == trace[0]["after"]
+    for index, entry in enumerate(trace):
+        assert entry["action"] == decisions[index]
+        assert entry["occurrence"] == (None if decisions[index] in {"SKIP", "END"} else index)
+        assert entry["edits_remaining"] == 2 - index
+        if decisions[index] == "INSERT:4":
+            assert entry["inserted_stage_index"] == 4
+        if index:
+            assert entry["before"] == trace[index - 1]["after"]
+        if decisions[index] in {"SKIP", "END"}:
+            assert entry["before"] == entry["after"]
+    if len(decisions) == 3:
+        assert calls[2]["allowed_actions"] == ["KEEP"]
     compiled_unitary = compiled.remove_final_measurements(inplace=False)
     original_unitary = circuit.remove_final_measurements(inplace=False)
     assert compiled_unitary is not None
@@ -162,8 +173,8 @@ def test_edits_preserve_unitary_and_measurement_wiring(decision: str) -> None:
         )
 
 
-def test_repeat_keeps_controller_property_set_and_reruns_analysis(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A repeat runs existing analyses again on the same shared state."""
+def test_insert_keeps_controller_property_set_and_reruns_analysis(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Insertion reruns existing analyses on the same shared state."""
     properties: list[PropertySet] = []
 
     class Initialize(AnalysisPass):
@@ -187,7 +198,8 @@ def test_repeat_keeps_controller_property_set_and_reruns_analysis(monkeypatch: p
     preset.pre_optimization = PassManager(Initialize())
     preset.optimization = PassManager(native)
     monkeypatch.setattr(editor, "generate_preset_pass_manager", lambda *_, **__: preset)
-    _, trace = editor.run_native_qiskit(QuantumCircuit(2), target, 0, lambda _: "REPEAT")
+    actions = iter(["INSERT:4", "KEEP"])
+    _, trace = editor.run_native_qiskit(QuantumCircuit(2), target, 0, lambda _: next(actions))
     wrapped = preset.optimization.to_flow_controller().tasks[0]
     assert cast("Any", wrapped).native.tasks[0] is native
     assert native.tasks[0] is loop
@@ -197,8 +209,41 @@ def test_repeat_keeps_controller_property_set_and_reruns_analysis(monkeypatch: p
     assert [entry["occurrence"] for entry in trace] == [0, 1]
 
 
-def test_invalid_decision_is_rejected() -> None:
+@pytest.mark.parametrize("decision", ["STOP", "REPEAT", "INSERT:0", "INSERT:tket"])
+def test_invalid_decision_is_rejected(decision: str) -> None:
     """Reject unsupported decisions before executing the native stage."""
     target = GenericBackendV2(2, seed=123).target
-    with pytest.raises(ValueError, match="Unknown optimization decision"):
-        editor.run_native_qiskit(QuantumCircuit(2), target, 0, lambda _: "STOP")
+    with pytest.raises(ValueError, match="Invalid"):
+        editor.run_native_qiskit(QuantumCircuit(2), target, 0, lambda _: decision)
+
+
+def test_insert_budget_is_enforced() -> None:
+    """A policy cannot keep inserting after using both edits."""
+    target = GenericBackendV2(2, seed=123).target
+    with pytest.raises(ValueError, match="Invalid"):
+        editor.run_native_qiskit(QuantumCircuit(2), target, 0, lambda _: "INSERT:4")
+
+
+def test_end_preserves_native_finalization(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ending optional work still executes the native post-optimization stage."""
+    calls = []
+
+    class Record(AnalysisPass):
+        def __init__(self, label: str) -> None:
+            super().__init__()
+            self.label = label
+
+        def run(self, dag: DAGCircuit) -> None:
+            del dag
+            calls.append(self.label)
+
+    target = GenericBackendV2(2, seed=123).target
+    preset = generate_preset_pass_manager(3, target=target, seed_transpiler=0)
+    preset.optimization = PassManager(Record("optimization"))
+    preset.post_optimization = PassManager(Record("finalization"))
+    monkeypatch.setattr(editor, "generate_preset_pass_manager", lambda *_, **__: preset)
+    _, trace = editor.run_native_qiskit(QuantumCircuit(2), target, 0, lambda _: "END")
+    assert calls == ["finalization"]
+    assert len(trace) == 1
+    assert trace[0]["action"] == "END"
+    assert trace[0]["occurrence"] is None

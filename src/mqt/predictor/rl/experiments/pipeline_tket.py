@@ -11,29 +11,33 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from pytket.extensions.qiskit import IBMQBackend, qiskit_to_tk
 from pytket.passes import SequencePass
 from pytket.predicates import CompilationUnit
 
+from mqt.predictor.rl.experiments.pipeline_actions import PipelineActions
 from mqt.predictor.rl.experiments.worker import tket_physical_circuit
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from pytket import Circuit
     from qiskit import QuantumCircuit
     from qiskit_ibm_runtime.fake_provider import FakeBoston
 
+    from mqt.predictor.rl.experiments.pipeline_actions import Policy
+
 OPTIONAL_STAGES = frozenset({
     "FullPeepholeOptimise",
+    "GreedyPauliSimp",
     "KAKDecomposition",
     "CliffordSimp",
     "SynthesiseTket",
     "AutoSquash",
     "RemoveRedundancies",
 })
-Policy = Callable[[dict[str, Any]], str]
 
 
 def features(circuit: Circuit) -> dict[str, Any]:
@@ -54,42 +58,60 @@ def run_tket(
     *,
     on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[dict[str, Any]]:
-    """Apply native stage objects to one unit; REPEAT adds one invocation."""
+    """Edit native optimization blocks while retaining routing and rebasing."""
     trace = []
-    for index, stage in enumerate(pipeline.get_sequence()):
-        config = stage.to_dict()["StandardPass"]
+    actions = PipelineActions(policy)
+    stages = pipeline.get_sequence()
+    configs = [stage.to_dict()["StandardPass"] for stage in stages]
+    optional = [config["name"] in OPTIONAL_STAGES for config in configs]
+    for index, stage in enumerate(stages):
+        config = configs[index]
         name = config["name"]
-        optional = name in OPTIONAL_STAGES
-        before = features(unit.circuit)
-        state = {
-            "compiler": "tket",
-            "stage_index": index,
-            "stage_name": name,
-            "stage_config": config,
-            "allowed_actions": ["KEEP", "SKIP", "REPEAT"] if optional else ["KEEP"],
-            "before": before,
-        }
-        action = "KEEP" if policy is None else policy(state)
-        if action not in state["allowed_actions"]:
-            msg = f"Invalid {action!r} for TKET stage {index}:{name}."
-            raise ValueError(msg)
-        invocations = {"SKIP": 0, "KEEP": 1, "REPEAT": 2}[action]
-        for occurrence in range(max(1, invocations)):
+        # Keep swap-enabled preprocessing before mapping and synthesis before
+        # the final rebase. Insertions cannot cross required native stages.
+        start = stop = index
+        while start > 0 and optional[start - 1]:
+            start -= 1
+        while stop < len(stages) and optional[stop]:
+            stop += 1
+        occurrence = 0
+        while True:
+            state = {
+                "compiler": "tket",
+                "stage_index": index,
+                "stage_name": name,
+                "stage_config": config,
+                "before": features(unit.circuit),
+            }
+            insertions = {
+                candidate: {"stage_name": configs[candidate]["name"], "stage_config": configs[candidate]}
+                for candidate in range(start, stop)
+                if all(predicate.verify(unit.circuit) for predicate in stages[candidate].get_preconditions())
+            }
+            action = actions.decide(
+                state, optional=optional[index], insertions=insertions, can_end=any(optional[index:])
+            )
+            inserted = int(action.split(":")[1]) if action.startswith("INSERT:") else None
+            selected = stage if inserted is None else stages[inserted]
+            execute = action != "SKIP" and (action != "END" or not optional[index])
             entry = {
                 **state,
                 "action": action,
-                "occurrence": occurrence if invocations else None,
-                "before": before,
+                "occurrence": occurrence if execute else None,
             }
+            if inserted is not None:
+                entry.update(inserted_stage_index=inserted, **insertions[inserted])
             if on_event is not None:
                 on_event({**entry, "event": "before"})
-            if invocations:
-                stage.apply(unit)
+            if execute:
+                selected.apply(unit)
             entry["after"] = features(unit.circuit)
             trace.append(entry)
             if on_event is not None:
                 on_event({**entry, "event": "after"})
-            before = entry["after"]
+            if inserted is None:
+                break
+            occurrence += 1
     return trace
 
 

@@ -31,13 +31,17 @@ def test_edit_policy_rejects_mandatory_and_unknown_edits() -> None:
     """Keep mandatory stages and reject unused stage indices."""
     state = {"stage_index": 2, "stage_name": "Mapping", "allowed_actions": ["KEEP"]}
     with pytest.raises(ValueError, match=r"Invalid 'SKIP'.*Mapping"):
-        EditPolicy({2: "SKIP"})(state)
-    policy = EditPolicy({99: "SKIP"})
+        EditPolicy({2: ["SKIP"]})(state)
+    policy = EditPolicy({99: ["SKIP"]})
     assert policy(state) == "KEEP"
     with pytest.raises(ValueError, match=r"Unknown editable stage indices:.*99"):
         policy.validate()
-    policy = EditPolicy({2: "REPEAT"})
-    assert policy({**state, "allowed_actions": ["KEEP", "SKIP", "REPEAT"]}) == "REPEAT"
+    policy = EditPolicy({2: ["INSERT:2", "END"]})
+    state = {**state, "allowed_actions": ["KEEP", "INSERT:2", "END"]}
+    assert policy(state) == "INSERT:2"
+    with pytest.raises(ValueError, match="Unconsumed edits"):
+        policy.validate()
+    assert policy(state) == "END"
     policy.validate()
 
 
@@ -78,18 +82,20 @@ def test_pipeline_worker_scores_frozen_circuit(compiler: str, tmp_path: Path, mo
 
 
 @pytest.mark.parametrize(
-    ("compiler", "level_args", "native_stage"),
+    ("compiler", "level_args", "native_stage", "edit_index"),
     [
-        ("qiskit", [], "optimization"),
-        ("tket", ["--tket-level", "3"], "GreedyPauliSimp"),
-        ("bqskit", ["--bqskit-level", "3"], "Iterative Resynthesis Optimization"),
+        ("qiskit", [], "optimization", 4),
+        ("tket", ["--tket-level", "3"], "GreedyPauliSimp", 6),
+        ("bqskit", ["--bqskit-level", "3"], "Iterative Resynthesis Optimization", 7),
     ],
 )
+@pytest.mark.parametrize("edited", [False, True])
 def test_pipeline_cli_writes_manifest_and_result(
-    tmp_path: Path, compiler: str, level_args: list[str], native_stage: str
+    tmp_path: Path, compiler: str, level_args: list[str], native_stage: str, edit_index: int, edited: bool
 ) -> None:
     """Use the installed module command and inspect its completed run artifacts."""
     output = tmp_path / "run"
+    edit_args = ["--edit", f"{edit_index}:INSERT:{edit_index}", "--edit", f"{edit_index}:END"] if edited else []
     subprocess.run(
         [
             sys.executable,
@@ -98,6 +104,7 @@ def test_pipeline_cli_writes_manifest_and_result(
             "--compiler",
             compiler,
             *level_args,
+            *edit_args,
             "--config",
             str(ROOT / "experiments/scasia.toml"),
             "--output",
@@ -118,7 +125,8 @@ def test_pipeline_cli_writes_manifest_and_result(
         assert manifest[f"{compiler}_level"] == 3
     assert manifest["circuits"] == ["train/ghz_2_indep.qasm"]
     assert manifest["seeds"] == [0]
-    assert manifest["edits"] == {}
+    assert manifest["edits"] == ({str(edit_index): [f"INSERT:{edit_index}", "END"]} if edited else {})
+    assert manifest["max_edits"] == 2
     assert manifest["inputs"] == Inputs(ROOT / "experiments/assets").manifest
     assert manifest["dependencies"]["qiskit"]
     assert len(manifest["commit"]) == 40
@@ -130,3 +138,10 @@ def test_pipeline_cli_writes_manifest_and_result(
     assert rows[0]["seed"] == 0
     assert rows[0]["stage_trace"]
     assert native_stage in {stage["stage_name"] for stage in rows[0]["stage_trace"]}
+    if edited:
+        decisions = [entry for entry in rows[0]["stage_trace"] if entry["stage_index"] == edit_index]
+        assert [entry["action"] for entry in decisions] == [f"INSERT:{edit_index}", "END"]
+        assert decisions[0]["status"] == "ok"
+        assert decisions[1]["status"] == "skipped"
+        assert [entry["edits_remaining"] for entry in decisions] == [2, 1]
+        assert decisions[0]["inserted_stage_index"] == edit_index

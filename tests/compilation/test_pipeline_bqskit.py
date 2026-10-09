@@ -105,8 +105,10 @@ def test_staged_keep_matches_native(compiler: RuntimeCompiler, width: int, level
     ]
     assert len(events) == 2 * len(trace)
     assert all(entry["action"] == "KEEP" for entry in trace)
-    if level == 3:
-        assert all(entry["allowed_actions"] == ["KEEP"] for entry in trace)
+    candidates = {1: {}, 2: {8: {8}, 9: {8}}, 3: {7: {7}, 8: {7}, 9: {9}, 10: {9}}}[level]
+    for entry in trace:
+        assert set(entry["insertion_candidates"]) == candidates.get(entry["stage_index"], set())
+        assert entry["edits_remaining"] == 2
     assert all(events[index]["event"] == ("before" if index % 2 == 0 else "after") for index in range(len(events)))
     json.dumps(trace, allow_nan=False)
     assert_measurements_and_unitary(circuit, actual, data)
@@ -143,27 +145,58 @@ def assert_measurements_and_unitary(circuit: Circuit, compiled: Circuit, data: P
     np.testing.assert_allclose(actual, expected * phase, atol=2e-7, rtol=0)
 
 
-@pytest.mark.parametrize("action", ["SKIP", "REPEAT"])
-def test_optional_edit_preserves_unitary_maps_and_measurements(compiler: RuntimeCompiler, action: str) -> None:
-    """Skip or repeat only optional deletion, preserving circuit semantics."""
+@pytest.mark.parametrize(
+    ("level", "edits"),
+    [
+        (2, {8: ["SKIP"]}),
+        (2, {9: ["INSERT:8", "INSERT:8"]}),
+        (3, {7: ["SKIP"], 9: ["SKIP"]}),
+        (3, {8: ["INSERT:7", "END"]}),
+        (3, {0: ["END"]}),
+    ],
+)
+def test_optional_edit_preserves_unitary_maps_and_measurements(
+    compiler: RuntimeCompiler, level: int, edits: dict[int, list[str]]
+) -> None:
+    """Skip, insert, or end while retaining native finalization and semantics."""
     circuit = measured_circuit(3)
     seen = []
+    commands = {index: iter(actions) for index, actions in edits.items()}
 
     def policy(state: dict[str, Any]) -> str:
         seen.append(state)
-        return action if action in state["allowed_actions"] else "KEEP"
+        return next(commands[state["stage_index"]], "KEEP") if state["stage_index"] in commands else "KEEP"
 
-    actual, data, trace = compile_bqskit(circuit, model(3), compiler, policy, optimization_level=2)
+    actual, data, trace = compile_bqskit(circuit, model(3), compiler, policy, optimization_level=level)
     assert_measurements_and_unitary(circuit, actual, data)
-    assert len(seen) == 12
-    edits = [entry for entry in trace if entry["stage_name"] == "Gate Deletion Optimization"]
-    assert len(edits) == (1 if action == "SKIP" else 2)
-    assert [entry["occurrence"] for entry in edits] == ([None] if action == "SKIP" else [0, 1])
-    assert all(entry["action"] == "KEEP" for entry in trace if len(entry["allowed_actions"]) == 1)
+    assert [entry["action"] for entry in trace if entry["action"] != "KEEP" and not entry["automatic"]] == [
+        action for actions in edits.values() for action in actions
+    ]
+    assert all(next(remaining, None) is None for remaining in commands.values())
+    assert trace[-1]["edits_remaining"] == 2 - sum(len(actions) for actions in edits.values())
+    assert trace[-1]["stage_name"] == "RestoreMeasurements"
+    assert trace[-1]["occurrence"] == 0
+    inserted = [entry for entry in trace if "inserted_stage_index" in entry]
+    for entry in inserted:
+        source = next(item for item in trace if item["stage_index"] == entry["inserted_stage_index"])
+        assert entry["stage_name"] == source["stage_name"]
+        assert entry["occurrence"] is not None
+    if 0 in edits:
+        assert len(seen) == 1
+        assert all(entry["automatic"] for entry in trace[1:])
+        assert [entry["stage_index"] for entry in trace if entry["occurrence"] is None] == [7, 9]
+    if edits.get(9) == ["INSERT:8", "INSERT:8"]:
+        decisions = [entry for entry in trace if entry["stage_index"] == 9]
+        assert [entry["occurrence"] for entry in decisions] == [0, 1, 2]
+        assert decisions[-1]["allowed_actions"] == ["KEEP"]
+        assert [entry["before"] for entry in decisions[1:]] == [entry["after"] for entry in decisions[:-1]]
     native_gates = set(model(3).gate_set)
     assert all(
         operation.gate in native_gates or isinstance(operation.gate, MeasurementPlaceholder) for operation in actual
     )
+    without_measurements = actual.copy()
+    without_measurements.remove_all_measurements()
+    assert set(without_measurements.coupling_graph) <= set(model(3).coupling_graph)
 
 
 def test_required_stage_cannot_be_skipped(compiler: RuntimeCompiler) -> None:

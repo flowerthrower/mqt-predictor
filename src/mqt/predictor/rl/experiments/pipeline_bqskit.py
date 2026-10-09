@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any
 
 from bqskit.compiler.compile import build_workflow
 
+from .pipeline_actions import PipelineActions
+
 if TYPE_CHECKING:
     from bqskit.compiler.compiler import Compiler
     from bqskit.compiler.machine import MachineModel
@@ -23,8 +25,13 @@ if TYPE_CHECKING:
     from bqskit.compiler.workflow import Workflow
     from bqskit.ir.circuit import Circuit
 
-OPTIONAL_STAGES = frozenset({"Gate Deletion Optimization"})
-Policy = Callable[[dict[str, Any]], str]
+    from .pipeline_actions import Policy
+
+OPTIONAL_STAGES = frozenset({
+    "Gate Deletion Optimization",
+    "Iterative Resynthesis Optimization",
+    "Iterative Gate Deletion Optimization",
+})
 EventCallback = Callable[[dict[str, Any]], None]
 
 
@@ -55,7 +62,9 @@ def run_bqskit(
 ) -> tuple[Circuit, PassData, list[dict[str, Any]]]:
     """Keep native nested workflows and carry their full PassData across stages.
 
-    REPEAT adds one stage invocation. The client receives every stage boundary;
+    INSERT runs a configured native stage without advancing the cursor.
+    END skips optional work but preserves required native finalization.
+    The client receives every stage boundary;
     policy functions and watchdog connections never enter distributed workers.
     Native synthesis can return equivalent Euler angles across repeated runs;
     KEEP preserves its gate structure and numerical behavior, not byte identity.
@@ -63,47 +72,60 @@ def run_bqskit(
     current = circuit.copy()
     data: PassData | None = None
     trace: list[dict[str, Any]] = []
+    actions = PipelineActions(policy)
+    optional = {index: stage for index, stage in enumerate(workflow) if stage.name in OPTIONAL_STAGES}
+    single_retarget = next(index for index, stage in enumerate(workflow) if stage.name == "Single Qudit Retargeting")
+    finalization = next(index for index, stage in enumerate(workflow) if stage.name == "LogErrorPass")
     for index, stage in enumerate(workflow):
-        before = features(current, data)
-        state = {
-            "compiler": "bqskit",
-            "stage_index": index,
-            "stage_name": stage.name,
-            "allowed_actions": ["KEEP", "SKIP", "REPEAT"] if stage.name in OPTIONAL_STAGES else ["KEEP"],
-            "before": before,
+        # Resynthesis can introduce non-native single-qudit gates. Deletion
+        # retains the native gate set; both run before placement/measurements.
+        insertions = {
+            candidate: {"stage_name": insertion.name}
+            for candidate, insertion in optional.items()
+            if (
+                candidate <= index <= single_retarget
+                if insertion.name == "Iterative Resynthesis Optimization"
+                else single_retarget < index <= finalization
+            )
         }
-        action = "KEEP" if policy is None else policy(state)
-        if action not in state["allowed_actions"]:
-            msg = f"Invalid {action!r} for BQSKit stage {index}:{stage.name}."
-            raise ValueError(msg)
-        invocations = {"SKIP": 0, "KEEP": 1, "REPEAT": 2}[action]
-        for occurrence in range(invocations):
-            entry = {**state, "action": action, "occurrence": occurrence, "before": before}
+        occurrence = 0
+        while True:
+            before = features(current, data)
+            state = {
+                "compiler": "bqskit",
+                "stage_index": index,
+                "stage_name": stage.name,
+                "before": before,
+            }
+            action = actions.decide(
+                state, optional=index in optional, insertions=insertions, can_end=any(i >= index for i in optional)
+            )
+            insertion = int(action.split(":")[1]) if action.startswith("INSERT:") else None
+            executed_stage = workflow[insertion] if insertion is not None else stage
+            skip = action == "SKIP" or (action == "END" and index in optional)
+            entry = {
+                **state,
+                "stage_name": executed_stage.name,
+                "action": action,
+                "occurrence": None if skip else occurrence,
+            }
+            if insertion is not None:
+                entry["inserted_stage_index"] = insertion
             if on_event is not None:
                 on_event({**entry, "event": "before"})
             started = time.monotonic()
-            # The list preserves the outer Workflow's per-stage RNG reset,
-            # including when this stage is itself a nested Workflow.
-            current, data = compiler.compile(current, [stage], request_data=True, data=data)
+            if not skip:
+                # The list preserves the outer Workflow's per-stage RNG reset,
+                # including when this stage is itself a nested Workflow.
+                current, data = compiler.compile(current, [executed_stage], request_data=True, data=data)
             after = features(current, data)
-            entry.update(after=after, runtime_seconds=time.monotonic() - started)
+            entry.update(after=after, runtime_seconds=0.0 if skip else time.monotonic() - started)
             trace.append(entry)
             if on_event is not None:
                 on_event({**entry, "event": "after"})
-            before = after
-        if not invocations:
-            entry = {
-                **state,
-                "action": action,
-                "occurrence": None,
-                "before": before,
-                "after": before,
-                "runtime_seconds": 0.0,
-            }
-            trace.append(entry)
-            if on_event is not None:
-                on_event({**entry, "event": "before"})
-                on_event({**entry, "event": "after"})
+            if insertion is None:
+                break
+            occurrence += 1
     if data is None:
         msg = "The native workflow must contain a required stage."
         raise ValueError(msg)

@@ -22,7 +22,7 @@ from pytket.extensions.qiskit import IBMQBackend, qiskit_to_tk
 from pytket.passes import SequencePass
 from pytket.predicates import CompilationUnit
 from qiskit import ClassicalRegister, QuantumCircuit, QuantumRegister
-from qiskit.quantum_info import Statevector
+from qiskit.quantum_info import Operator, Statevector
 
 from mqt.predictor.rl.experiments.inputs import load_target
 from mqt.predictor.rl.experiments.metrics import observe
@@ -30,6 +30,7 @@ from mqt.predictor.rl.experiments.pipeline_tket import compile_tket, features, r
 from mqt.predictor.rl.experiments.worker import tket_physical_circuit
 
 if TYPE_CHECKING:
+    from pytket.circuit import UnitID
     from qiskit.transpiler import Target
 
     from mqt.predictor.rl.experiments.inputs import FrozenBoston
@@ -123,28 +124,38 @@ def test_keep_matches_native_circuit_maps_and_measurements(
     assert classical_distribution(actual) == pytest.approx(classical_distribution(circuit), abs=1e-10)
     if optimisation_level == 3:
         assert trace[3]["stage_name"] == "GreedyPauliSimp"
-        assert trace[3]["allowed_actions"] == ["KEEP"]
+        assert "SKIP" in trace[3]["allowed_actions"]
     json.dumps(trace, allow_nan=False)
 
 
-@pytest.mark.parametrize("action", ["SKIP", "REPEAT"])
+@pytest.mark.parametrize("action", ["SKIP", "INSERT", "END"])
+@pytest.mark.parametrize("optimisation_level", [2, 3])
 def test_optional_edits_preserve_native_validity_and_measurement_semantics(
-    backend_target: tuple[FrozenBoston, Target], action: str
+    backend_target: tuple[FrozenBoston, Target], action: str, optimisation_level: int
 ) -> None:
-    """SKIP and REPEAT retain connectivity, basis and measurement outcomes."""
+    """Edits retain connectivity, basis and measurement outcomes within budget."""
     backend, target = backend_target
     circuit = measured_circuit(True)
     seen = []
 
     def policy(state: dict[str, Any]) -> str:
         seen.append(state)
-        return action if action in state["allowed_actions"] else "KEEP"
+        selected = f"INSERT:{state['stage_index']}" if action == "INSERT" else action
+        return selected if "SKIP" in state["allowed_actions"] and selected in state["allowed_actions"] else "KEEP"
 
     events = []
-    actual, unit, trace = compile_tket(circuit, backend, policy, on_event=events.append)
-    assert len(seen) == 10
-    assert all(entry["action"] == "KEEP" for entry in trace if len(entry["allowed_actions"]) == 1)
-    assert len([entry for entry in trace if entry["occurrence"] is not None]) == (4 if action == "SKIP" else 16)
+    actual, unit, trace = compile_tket(
+        circuit, backend, policy, optimisation_level=optimisation_level, on_event=events.append
+    )
+    edited = [entry for entry in trace if entry["action"] != "KEEP" and not entry["automatic"]]
+    assert len(edited) == (1 if action == "END" else 2)
+    expected_invocations = {"SKIP": 8, "INSERT": 12, "END": 4 if optimisation_level == 2 else 6}[action]
+    assert sum(entry["occurrence"] is not None for entry in trace) == expected_invocations
+    if action == "END":
+        assert len(seen) == (2 if optimisation_level == 2 else 4)
+        assert all(entry["automatic"] for entry in trace[len(seen) :])
+    else:
+        assert trace[-1]["edits_remaining"] == 0
     assert len(events) == 2 * len(trace)
     for entry, before_event, after_event in zip(trace, events[::2], events[1::2], strict=True):
         assert before_event == {**{key: value for key, value in entry.items() if key != "after"}, "event": "before"}
@@ -158,6 +169,116 @@ def test_optional_edits_preserve_native_validity_and_measurement_semantics(
         for instruction in actual.data
     )
 
+    assert classical_distribution(actual) == pytest.approx(classical_distribution(circuit), abs=1e-10)
+    assert unit.final_map
+
+    unmeasured = circuit.remove_final_measurements(inplace=False)
+    assert unmeasured is not None
+    source = qiskit_to_tk(unmeasured)
+    _, compiled, _ = compile_tket(unmeasured, backend, policy, optimisation_level=optimisation_level)
+    n_qubits = source.n_qubits
+    positions: dict[UnitID, int] = {qubit: index for index, qubit in enumerate(compiled.circuit.qubits)}
+    axes = [
+        offset + positions[mapping[qubit]]
+        for offset, mapping in ((0, compiled.final_map), (n_qubits, compiled.initial_map))
+        for qubit in source.qubits
+    ]
+    logical_unitary = (
+        compiled.circuit
+        .get_unitary()
+        .reshape((2,) * (2 * n_qubits))
+        .transpose(axes)
+        .reshape((2**n_qubits, 2**n_qubits))
+    )
+    assert Operator(logical_unitary).equiv(Operator(source.get_unitary()))
+
+
+def test_insert_reuses_native_stage_before_continuing_same_cursor(
+    backend_target: tuple[FrozenBoston, Target],
+) -> None:
+    """Inserted native stages preserve their configuration, ordering and maps."""
+    backend, target = backend_target
+    circuit = measured_circuit(True)
+    expected = CompilationUnit(qiskit_to_tk(circuit))
+    pipeline = IBMQBackend.default_compilation_pass_offline(
+        backend.configuration(), backend.properties(), optimisation_level=2
+    )
+    assert isinstance(pipeline, SequencePass)
+    stages = pipeline.get_sequence()
+    insertions = {4: 6, 5: 4}
+    for index, stage in enumerate(stages):
+        if index in insertions:
+            stages[insertions[index]].apply(expected)
+        stage.apply(expected)
+
+    seen = []
+
+    def policy(state: dict[str, Any]) -> str:
+        seen.append(state)
+        if (source := insertions.pop(state["stage_index"], None)) is not None:
+            return f"INSERT:{source}"
+        return "KEEP"
+
+    actual, unit, trace = compile_tket(circuit, backend, policy)
+    assert unit.circuit == expected.circuit
+    assert unit.initial_map == expected.initial_map
+    assert unit.final_map == expected.final_map
+    assert actual == tket_physical_circuit(expected, circuit)
+    assert observe(actual, target, physical=True)["esp_kind"] == "exact"
+    assert classical_distribution(actual) == pytest.approx(classical_distribution(circuit), abs=1e-10)
+    assert [(entry["stage_index"], entry["stage_name"]) for entry in trace[4:8]] == [
+        (4, "SynthesiseTket"),
+        (4, "KAKDecomposition"),
+        (5, "KAKDecomposition"),
+        (5, "CliffordSimp"),
+    ]
+    assert trace[4]["stage_config"] == stages[6].to_dict()["StandardPass"]
+    assert trace[4]["inserted_stage_index"] == 6
+    assert trace[4]["occurrence"] == 0
+    assert trace[5]["occurrence"] == 1
+    assert seen[5]["before"] == trace[4]["after"]
+
+
+@pytest.mark.parametrize(("cursor", "source"), [(4, 1), (8, 6)])
+def test_insert_cannot_cross_native_mapping_or_final_basis_boundary(
+    backend_target: tuple[FrozenBoston, Target], cursor: int, source: int
+) -> None:
+    """Swap-enabled preprocessing and CX synthesis retain their native phases."""
+    backend, _ = backend_target
+    with pytest.raises(ValueError, match="Invalid"):
+        compile_tket(
+            measured_circuit(False),
+            backend,
+            lambda state: f"INSERT:{source}" if state["stage_index"] == cursor else "KEEP",
+        )
+
+
+def test_end_at_required_stage_still_executes_native_finalization(
+    backend_target: tuple[FrozenBoston, Target],
+) -> None:
+    """END before preprocessing retains conversion, mapping and native basis."""
+    backend, target = backend_target
+    circuit = measured_circuit(True)
+    actual, unit, trace = compile_tket(circuit, backend, lambda _: "END", optimisation_level=3)
+    assert trace[0]["action"] == "END"
+    assert trace[0]["occurrence"] == 0
+    assert [entry["stage_name"] for entry in trace if entry["occurrence"] is not None] == [
+        "DecomposeBoxes",
+        "RemoveBarriers",
+        "AutoRebase",
+        "AutoRebase",
+        "CustomPassMap",
+        "AutoRebase",
+    ]
+    assert all(entry["automatic"] for entry in trace[1:])
+    assert observe(actual, target, physical=True)["esp_kind"] == "exact"
+    assert all(
+        target.instruction_supported(
+            operation_name=instruction.operation.name,
+            qargs=tuple(actual.find_bit(qubit).index for qubit in instruction.qubits),
+        )
+        for instruction in actual.data
+    )
     assert classical_distribution(actual) == pytest.approx(classical_distribution(circuit), abs=1e-10)
     assert unit.final_map
 
