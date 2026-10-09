@@ -94,18 +94,19 @@ def test_features_count_gates_without_barriers() -> None:
 
 
 @pytest.mark.parametrize("multiple_registers", [False, True])
+@pytest.mark.parametrize("optimisation_level", [2, 3])
 def test_keep_matches_native_circuit_maps_and_measurements(
-    backend_target: tuple[FrozenBoston, Target], multiple_registers: bool
+    backend_target: tuple[FrozenBoston, Target], multiple_registers: bool, optimisation_level: int
 ) -> None:
     """KEEP must preserve the native preset's circuit, maps and score."""
     backend, target = backend_target
     circuit = measured_circuit(multiple_registers)
     expected = CompilationUnit(qiskit_to_tk(circuit))
     pipeline = IBMQBackend.default_compilation_pass_offline(
-        backend.configuration(), backend.properties(), optimisation_level=2
+        backend.configuration(), backend.properties(), optimisation_level=optimisation_level
     )
     pipeline.apply(expected)
-    actual, unit, trace = compile_tket(circuit, backend)
+    actual, unit, trace = compile_tket(circuit, backend, optimisation_level=optimisation_level)
     reference = tket_physical_circuit(expected, circuit)
 
     assert unit.circuit == expected.circuit
@@ -119,6 +120,10 @@ def test_keep_matches_native_circuit_maps_and_measurements(
     assert observe(actual, target, physical=True) == observe(reference, target, physical=True)
     assert len(trace) == 10
     assert all(entry["action"] == "KEEP" for entry in trace)
+    assert classical_distribution(actual) == pytest.approx(classical_distribution(circuit), abs=1e-10)
+    if optimisation_level == 3:
+        assert trace[3]["stage_name"] == "GreedyPauliSimp"
+        assert trace[3]["allowed_actions"] == ["KEEP"]
     json.dumps(trace, allow_nan=False)
 
 

@@ -6,7 +6,7 @@
 #
 # Licensed under the MIT License
 
-"""Edit optional stages of TKET's native offline IBM O2 pipeline."""
+"""Edit optional stages of TKET's native offline IBM pipelines."""
 
 from __future__ import annotations
 
@@ -98,11 +98,12 @@ def compile_tket(
     backend: FakeBoston,
     policy: Policy | None = None,
     *,
+    optimisation_level: int = 2,
     on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[QuantumCircuit, CompilationUnit, list[dict[str, Any]]]:
     """Keep native LightSABRE defaults (seed 0, 50 attempts) and final maps."""
     pipeline = IBMQBackend.default_compilation_pass_offline(
-        backend.configuration(), backend.properties(), optimisation_level=2
+        backend.configuration(), backend.properties(), optimisation_level=optimisation_level
     )
     assert isinstance(pipeline, SequencePass)
     unit = CompilationUnit(qiskit_to_tk(circuit))

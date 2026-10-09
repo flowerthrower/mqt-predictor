@@ -77,7 +77,17 @@ def test_pipeline_worker_scores_frozen_circuit(compiler: str, tmp_path: Path, mo
         worker.close()
 
 
-def test_pipeline_cli_writes_manifest_and_result(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("compiler", "level_args", "native_stage"),
+    [
+        ("qiskit", [], "optimization"),
+        ("tket", ["--tket-level", "3"], "GreedyPauliSimp"),
+        ("bqskit", ["--bqskit-level", "3"], "Iterative Resynthesis Optimization"),
+    ],
+)
+def test_pipeline_cli_writes_manifest_and_result(
+    tmp_path: Path, compiler: str, level_args: list[str], native_stage: str
+) -> None:
     """Use the installed module command and inspect its completed run artifacts."""
     output = tmp_path / "run"
     subprocess.run(
@@ -86,7 +96,8 @@ def test_pipeline_cli_writes_manifest_and_result(tmp_path: Path) -> None:
             "-m",
             "mqt.predictor.rl.experiments.pipeline_editor",
             "--compiler",
-            "qiskit",
+            compiler,
+            *level_args,
             "--config",
             str(ROOT / "experiments/scasia.toml"),
             "--output",
@@ -102,7 +113,9 @@ def test_pipeline_cli_writes_manifest_and_result(tmp_path: Path) -> None:
     )
     manifest = json.loads((output / "manifest.json").read_text())
     rows: list[dict[str, Any]] = [json.loads(line) for line in (output / "results.jsonl").read_text().splitlines()]
-    assert manifest["compiler"] == "qiskit"
+    assert manifest["compiler"] == compiler
+    if level_args:
+        assert manifest[f"{compiler}_level"] == 3
     assert manifest["circuits"] == ["train/ghz_2_indep.qasm"]
     assert manifest["seeds"] == [0]
     assert manifest["edits"] == {}
@@ -116,3 +129,4 @@ def test_pipeline_cli_writes_manifest_and_result(tmp_path: Path) -> None:
     assert rows[0]["circuit_name"] == "train/ghz_2_indep.qasm"
     assert rows[0]["seed"] == 0
     assert rows[0]["stage_trace"]
+    assert native_stage in {stage["stage_name"] for stage in rows[0]["stage_trace"]}

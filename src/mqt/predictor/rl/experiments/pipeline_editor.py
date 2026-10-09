@@ -116,7 +116,9 @@ def compile_pipeline(
         with observe_qiskit_passes(_UnscoredObserver(connection, target)):
             result, _ = run_native_qiskit(circuit, target, request["seed"], policy, on_event=event)
     elif name == "tket":
-        result, _, _ = compile_tket(circuit, backend, policy, on_event=event)
+        result, _, _ = compile_tket(
+            circuit, backend, policy, optimisation_level=request.get("tket_level", 2), on_event=event
+        )
     elif name == "bqskit":
         model = MachineModel(
             target.num_qubits,
@@ -157,7 +159,8 @@ def main() -> None:
     parser.add_argument("--circuit", nargs="+", required=True, help="Exact archive names, e.g. train/qft_3_indep.qasm")
     parser.add_argument("--seed", nargs="+", type=int, default=[0])
     parser.add_argument("--edit", action="append", default=[], help="STAGE_INDEX:SKIP or STAGE_INDEX:REPEAT")
-    parser.add_argument("--bqskit-level", type=int, choices=(1, 2), default=1)
+    parser.add_argument("--bqskit-level", type=int, choices=(1, 2, 3), default=1)
+    parser.add_argument("--tket-level", type=int, choices=(2, 3), default=2)
     parser.add_argument("--bqskit-port", type=int, default=37472)
     parser.add_argument("--bqskit-worker-port", type=int, default=37474)
     args = parser.parse_args()
@@ -193,6 +196,8 @@ def main() -> None:
         "seeds": args.seed,
         "edits": edits,
         "bqskit_level": args.bqskit_level,
+        "tket_level": args.tket_level,
+        "tket_greedy_thread_timeout_seconds": 300 if args.compiler == "tket" and args.tket_level == 3 else None,
         "worker": settings,
         "tket_lightsabre": {"seed": 0, "attempts": 50},
         "timing": "compilation_seconds includes editor, conversion and BQSKit runtime startup; excludes final ESP",
@@ -211,6 +216,7 @@ def main() -> None:
                         "seed": seed,
                         "edits": edits,
                         "bqskit_level": args.bqskit_level,
+                        "tket_level": args.tket_level,
                     })
                     result.pop("circuit", None)
                     result.update(circuit_name=name, seed=seed)

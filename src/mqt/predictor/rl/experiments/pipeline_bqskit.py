@@ -124,9 +124,9 @@ def compile_bqskit(
     seed: int = 0,
     on_event: EventCallback | None = None,
 ) -> tuple[Circuit, PassData, list[dict[str, Any]]]:
-    """Use native level 1/2 defaults, including measurement and mapping passes."""
-    if optimization_level not in (1, 2):
-        msg = "This prototype supports native BQSKit levels 1 and 2."
+    """Use native level 1/2/3 defaults, including measurement and mapping passes."""
+    if optimization_level not in (1, 2, 3):
+        msg = "This prototype supports native BQSKit levels 1, 2, and 3."
         raise ValueError(msg)
     workflow = build_workflow(
         circuit,

@@ -82,7 +82,7 @@ def assert_native_equal(actual: Circuit, expected: Circuit) -> None:
 
 
 @pytest.mark.parametrize("width", [2, 3])
-@pytest.mark.parametrize("level", [1, 2])
+@pytest.mark.parametrize("level", [1, 2, 3])
 def test_staged_keep_matches_native(compiler: RuntimeCompiler, width: int, level: int) -> None:
     """Retain native gates, physical maps, measurement wires, and semantics."""
     circuit = measured_circuit(width)
@@ -93,7 +93,11 @@ def test_staged_keep_matches_native(compiler: RuntimeCompiler, width: int, level
     events = []
     actual, data, trace = compile_bqskit(circuit, target, compiler, optimization_level=level, on_event=events.append)
 
-    assert_native_equal(actual, expected)
+    if level == 3:
+        # Native resynthesis can redistribute rotations across gates on reruns.
+        assert [op[:3] for op in signature(actual)] == [op[:3] for op in signature(expected)]
+    else:
+        assert_native_equal(actual, expected)
     assert data.initial_mapping == initial
     assert data.final_mapping == final
     assert [entry["stage_name"] for entry in trace] == [
@@ -101,9 +105,13 @@ def test_staged_keep_matches_native(compiler: RuntimeCompiler, width: int, level
     ]
     assert len(events) == 2 * len(trace)
     assert all(entry["action"] == "KEEP" for entry in trace)
+    if level == 3:
+        assert all(entry["allowed_actions"] == ["KEEP"] for entry in trace)
     assert all(events[index]["event"] == ("before" if index % 2 == 0 else "after") for index in range(len(events)))
     json.dumps(trace, allow_nan=False)
     assert_measurements_and_unitary(circuit, actual, data)
+    if level == 3:
+        assert_measurements_and_unitary(circuit, expected, data)
 
 
 def assert_measurements_and_unitary(circuit: Circuit, compiled: Circuit, data: PassData) -> None:

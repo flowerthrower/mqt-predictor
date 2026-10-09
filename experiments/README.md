@@ -430,12 +430,13 @@ separate execution step.
 
 ## Native pipeline editor prototype
 
-The editor starts from actual SDK presets: Qiskit O3, offline IBM TKET O2, and
-BQSKit's default level 1 (optionally level 2). `KEEP` runs native stage objects
-with their original parameters, control flow, and mapping state. Unlike the
-earlier atomic-action teacher, Qiskit's initial synthesis is unchanged. BQSKit
-retains native synthesis tolerances; repeated native runs can produce equivalent
-numeric gate parameters, so byte-identical output is not guaranteed.
+The editor starts from actual SDK presets: Qiskit O3, offline IBM TKET O2/O3,
+and BQSKit levels 1/2/3. Defaults remain TKET O2 and BQSKit level 1. `KEEP` runs
+native stage objects with their original parameters, control flow, and mapping
+state. Unlike the earlier atomic-action teacher, Qiskit's initial synthesis is
+unchanged. BQSKit retains native synthesis tolerances; repeated native
+resynthesis can choose different gate parameters for equivalent complete
+circuits, so byte-identical output is not guaranteed.
 
 Run an unchanged preset on explicitly selected frozen circuits:
 
@@ -457,6 +458,8 @@ Unmentioned stages keep their native behavior.
 | TKET O2                             | `1`: FullPeepholeOptimise; `4`: KAKDecomposition; `5`: CliffordSimp; `6`: SynthesiseTket; `8`: AutoSquash; `9`: RemoveRedundancies |
 | BQSKit level 1                      | None; unchanged reference workflow                                                                                                 |
 | BQSKit level 2 (`--bqskit-level 2`) | `8`: Gate Deletion Optimization                                                                                                    |
+| TKET O3 (`--tket-level 3`)          | `6`: SynthesiseTket; `8`: AutoSquash; `9`: RemoveRedundancies                                                                      |
+| BQSKit level 3 (`--bqskit-level 3`) | None; unchanged reference workflow                                                                                                 |
 
 For example, append `--edit 4:SKIP` to the Qiskit command and select a new
 output directory. Mapping, rebasing, measurements, and native setup remain
@@ -479,3 +482,24 @@ not comparable pass counts across SDKs. Intermediate ESP and PPE are not
 computed here. The three adapter APIs accept a `policy(state)` callback with the
 compiler, stage, allowed actions, and current circuit counts. This version uses
 explicit edits; no GNN, transformer, or RL training is included.
+
+To run the native high-optimization presets without any edits or learned policy:
+
+```bash
+uv run --no-sync python -m mqt.predictor.rl.experiments.pipeline_editor \
+  --compiler tket --tket-level 3 --output ../../scasia-runs/native-tket-o3 \
+  --circuit test/bv_4_indep.qasm test/qft_5_indep.qasm
+
+uv run --no-sync python -m mqt.predictor.rl.experiments.pipeline_editor \
+  --compiler bqskit --bqskit-level 3 --output ../../scasia-runs/native-bqskit-o3 \
+  --circuit test/bv_4_indep.qasm test/qft_5_indep.qasm
+```
+
+These are comparison presets, not equivalent algorithms or equal search budgets.
+TKET O3 uses native GreedyPauliSimp with its default 300-second per-thread
+budget; the separate 60-second worker stage deadline still applies and records a
+timeout if exceeded. BQSKit level 3 adds iterative resynthesis and gate deletion
+with native search settings. Its level 4 preset is not exposed here. All runs
+retain the same frozen Boston target and final ESP scorer, and the editor
+overhead described above. These commands run only the named circuits; append
+other exact archive names to `--circuit` for a larger evaluation.
