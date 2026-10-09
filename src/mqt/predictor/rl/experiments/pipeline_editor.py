@@ -92,6 +92,7 @@ def compile_pipeline(
     """Run in CompilerWorker so a stalled native stage cannot hang the caller."""
     name = request["pipeline"]
     policy = EditPolicy(request.get("edits", {}))
+    max_edits = request.get("max_edits", MAX_EDITS)
     stages: list[dict[str, Any]] = []
     pending: dict[str, Any] = {}
 
@@ -122,10 +123,15 @@ def compile_pipeline(
     if name == "qiskit":
         # Keep internal pass deadlines but omit expensive intermediate ESP scores.
         with observe_qiskit_passes(_UnscoredObserver(connection, target)):
-            result, _ = run_native_qiskit(circuit, target, request["seed"], policy, on_event=event)
+            result, _ = run_native_qiskit(circuit, target, request["seed"], policy, max_edits=max_edits, on_event=event)
     elif name == "tket":
         result, _, _ = compile_tket(
-            circuit, backend, policy, optimisation_level=request.get("tket_level", 2), on_event=event
+            circuit,
+            backend,
+            policy,
+            optimisation_level=request.get("tket_level", 2),
+            max_edits=max_edits,
+            on_event=event,
         )
     elif name == "bqskit":
         model = MachineModel(
@@ -145,6 +151,7 @@ def compile_pipeline(
                 compiler,
                 policy,
                 optimization_level=request.get("bqskit_level", 1),
+                max_edits=max_edits,
                 seed=request["seed"],
                 on_event=event,
             )
@@ -166,6 +173,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--circuit", nargs="+", required=True, help="Exact archive names, e.g. train/qft_3_indep.qasm")
     parser.add_argument("--seed", nargs="+", type=int, default=[0])
+    parser.add_argument("--max-edits", type=int, default=MAX_EDITS, help="Maximum edits per compilation (default: 2)")
     parser.add_argument(
         "--edit", action="append", default=[], help="INDEX:SKIP, INDEX:END, or INDEX:INSERT:NATIVE_STAGE_INDEX"
     )
@@ -174,6 +182,8 @@ def main() -> None:
     parser.add_argument("--bqskit-port", type=int, default=37472)
     parser.add_argument("--bqskit-worker-port", type=int, default=37474)
     args = parser.parse_args()
+    if args.max_edits < 0:
+        parser.error("--max-edits must be nonnegative.")
     edits: dict[int, list[str]] = {}
     for edit in args.edit:
         index, separator, action = edit.partition(":")
@@ -190,8 +200,8 @@ def main() -> None:
         if actions and not actions[-1].startswith("INSERT:"):
             parser.error(f"Only INSERT allows another decision at the same stage: {edit}")
         actions.append(action)
-    if sum(action != "KEEP" for actions in edits.values() for action in actions) > MAX_EDITS:
-        parser.error(f"At most {MAX_EDITS} edits are allowed per compilation.")
+    if sum(action != "KEEP" for actions in edits.values() for action in actions) > args.max_edits:
+        parser.error(f"At most {args.max_edits} edits are allowed per compilation.")
     config = tomllib.loads(args.config.read_text())
     inputs = Inputs((args.config.resolve().parent / config["assets"]).resolve())
     for name in args.circuit:
@@ -217,7 +227,7 @@ def main() -> None:
         "circuits": args.circuit,
         "seeds": args.seed,
         "edits": edits,
-        "max_edits": MAX_EDITS,
+        "max_edits": args.max_edits,
         "bqskit_level": args.bqskit_level,
         "tket_level": args.tket_level,
         "tket_greedy_thread_timeout_seconds": 300 if args.compiler == "tket" and args.tket_level == 3 else None,
@@ -238,6 +248,7 @@ def main() -> None:
                         "circuit": inputs.circuit(name),
                         "seed": seed,
                         "edits": edits,
+                        "max_edits": args.max_edits,
                         "bqskit_level": args.bqskit_level,
                         "tket_level": args.tket_level,
                     })

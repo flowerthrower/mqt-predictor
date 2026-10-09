@@ -107,10 +107,18 @@ def test_ae8_native_keep_does_not_use_modified_atomic_teacher(frozen_inputs: tup
 
 
 @pytest.mark.parametrize(
-    "decisions",
-    [("KEEP",), ("SKIP",), ("END",), ("INSERT:4", "KEEP"), ("INSERT:4", "INSERT:4", "KEEP")],
+    ("decisions", "max_edits"),
+    [
+        (("KEEP",), 0),
+        (("KEEP",), 2),
+        (("SKIP",), 2),
+        (("END",), 2),
+        (("INSERT:4", "KEEP"), 2),
+        (("INSERT:4", "INSERT:4", "KEEP"), 2),
+        (("INSERT:4", "INSERT:4", "INSERT:4", "INSERT:4", "KEEP"), 4),
+    ],
 )
-def test_edits_preserve_unitary_and_measurement_wiring(decisions: tuple[str, ...]) -> None:
+def test_edits_preserve_unitary_and_measurement_wiring(decisions: tuple[str, ...], max_edits: int) -> None:
     """Optional edits preserve semantics and physical output indices."""
     target = GenericBackendV2(
         4,
@@ -133,26 +141,26 @@ def test_edits_preserve_unitary_and_measurement_wiring(decisions: tuple[str, ...
         return next(actions)
 
     events = []
-    compiled, trace = editor.run_native_qiskit(circuit, target, 7, policy, on_event=events.append)
+    compiled, trace = editor.run_native_qiskit(circuit, target, 7, policy, max_edits=max_edits, on_event=events.append)
     assert len(calls) == len(decisions)
     assert calls[0]["compiler"] == "qiskit"
     assert calls[0]["stage_name"] == "optimization"
-    assert set(calls[0]["allowed_actions"]) == {"KEEP", "SKIP", "INSERT:4", "END"}
+    assert set(calls[0]["allowed_actions"]) == ({"KEEP", "SKIP", "INSERT:4", "END"} if max_edits else {"KEEP"})
     assert calls[0]["insertion_candidates"][4]["stage_name"] == "optimization"
     assert len(trace) == len(decisions)
     assert [event["event"] for event in events] == ["before", "after"] * len(trace)
     for index, entry in enumerate(trace):
         assert entry["action"] == decisions[index]
         assert entry["occurrence"] == (None if decisions[index] in {"SKIP", "END"} else index)
-        assert entry["edits_remaining"] == 2 - index
+        assert entry["edits_remaining"] == max_edits - index
         if decisions[index] == "INSERT:4":
             assert entry["inserted_stage_index"] == 4
         if index:
             assert entry["before"] == trace[index - 1]["after"]
         if decisions[index] in {"SKIP", "END"}:
             assert entry["before"] == entry["after"]
-    if len(decisions) == 3:
-        assert calls[2]["allowed_actions"] == ["KEEP"]
+    if len(decisions) == max_edits + 1:
+        assert calls[-1]["allowed_actions"] == ["KEEP"]
     compiled_unitary = compiled.remove_final_measurements(inplace=False)
     original_unitary = circuit.remove_final_measurements(inplace=False)
     assert compiled_unitary is not None
@@ -217,11 +225,20 @@ def test_invalid_decision_is_rejected(decision: str) -> None:
         editor.run_native_qiskit(QuantumCircuit(2), target, 0, lambda _: decision)
 
 
-def test_insert_budget_is_enforced() -> None:
-    """A policy cannot keep inserting after using both edits."""
+@pytest.mark.parametrize("max_edits", [0, 2, 4])
+def test_insert_budget_is_enforced(max_edits: int) -> None:
+    """A policy cannot keep inserting after using its configured budget."""
     target = GenericBackendV2(2, seed=123).target
+    calls = []
+
+    def policy(state: dict[str, Any]) -> str:
+        calls.append(state)
+        return "INSERT:4"
+
     with pytest.raises(ValueError, match="Invalid"):
-        editor.run_native_qiskit(QuantumCircuit(2), target, 0, lambda _: "INSERT:4")
+        editor.run_native_qiskit(QuantumCircuit(2), target, 0, policy, max_edits=max_edits)
+    assert len(calls) == max_edits + 1
+    assert calls[-1]["allowed_actions"] == ["KEEP"]
 
 
 def test_end_preserves_native_finalization(monkeypatch: pytest.MonkeyPatch) -> None:

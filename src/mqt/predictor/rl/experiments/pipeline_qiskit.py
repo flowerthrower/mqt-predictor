@@ -16,7 +16,7 @@ from qiskit.passmanager.base_tasks import Task
 from qiskit.transpiler import PassManager
 from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 
-from .pipeline_actions import PipelineActions
+from .pipeline_actions import MAX_EDITS, PipelineActions
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -53,11 +53,12 @@ class _OptimizationDecision(Task):
         trace: list[dict[str, Any]],
         *,
         seed: int = 0,
+        max_edits: int = MAX_EDITS,
         on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         """Retain the native stage and its policy and observation hooks."""
         self.native = native
-        self.actions = PipelineActions(policy)
+        self.actions = PipelineActions(policy, max_edits=max_edits)
         self.trace = trace
         self.seed = seed
         self.on_event = on_event
@@ -108,6 +109,7 @@ def run_native_qiskit(
     seed: int,
     policy: Policy | None = None,
     *,
+    max_edits: int = MAX_EDITS,
     callback: Callable | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[QuantumCircuit, list[dict[str, Any]]]:
@@ -121,5 +123,7 @@ def run_native_qiskit(
     trace: list[dict[str, Any]] = []
     if preset.optimization is not None:
         native = preset.optimization.to_flow_controller()
-        preset.optimization = PassManager([_OptimizationDecision(native, policy, trace, seed=seed, on_event=on_event)])
+        preset.optimization = PassManager([
+            _OptimizationDecision(native, policy, trace, seed=seed, max_edits=max_edits, on_event=on_event)
+        ])
     return preset.run(circuit, callback=callback), trace

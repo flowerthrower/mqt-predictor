@@ -17,7 +17,7 @@ from pytket.extensions.qiskit import IBMQBackend, qiskit_to_tk
 from pytket.passes import SequencePass
 from pytket.predicates import CompilationUnit
 
-from mqt.predictor.rl.experiments.pipeline_actions import PipelineActions
+from mqt.predictor.rl.experiments.pipeline_actions import MAX_EDITS, PipelineActions
 from mqt.predictor.rl.experiments.worker import tket_physical_circuit
 
 if TYPE_CHECKING:
@@ -56,11 +56,12 @@ def run_tket(
     pipeline: SequencePass,
     policy: Policy | None = None,
     *,
+    max_edits: int = MAX_EDITS,
     on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Edit native optimization blocks while retaining routing and rebasing."""
     trace = []
-    actions = PipelineActions(policy)
+    actions = PipelineActions(policy, max_edits=max_edits)
     stages = pipeline.get_sequence()
     configs = [stage.to_dict()["StandardPass"] for stage in stages]
     optional = [config["name"] in OPTIONAL_STAGES for config in configs]
@@ -121,6 +122,7 @@ def compile_tket(
     policy: Policy | None = None,
     *,
     optimisation_level: int = 2,
+    max_edits: int = MAX_EDITS,
     on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[QuantumCircuit, CompilationUnit, list[dict[str, Any]]]:
     """Keep native LightSABRE defaults (seed 0, 50 attempts) and final maps."""
@@ -129,5 +131,5 @@ def compile_tket(
     )
     assert isinstance(pipeline, SequencePass)
     unit = CompilationUnit(qiskit_to_tk(circuit))
-    trace = run_tket(unit, pipeline, policy, on_event=on_event)
+    trace = run_tket(unit, pipeline, policy, max_edits=max_edits, on_event=on_event)
     return tket_physical_circuit(unit, circuit), unit, trace

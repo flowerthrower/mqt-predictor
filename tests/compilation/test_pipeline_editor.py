@@ -21,10 +21,45 @@ import pytest
 
 from mqt.predictor.reward import estimated_success_probability
 from mqt.predictor.rl.experiments.inputs import Inputs, load_target
-from mqt.predictor.rl.experiments.pipeline_editor import EditPolicy
+from mqt.predictor.rl.experiments.pipeline_actions import PipelineActions
+from mqt.predictor.rl.experiments.pipeline_editor import EditPolicy, main
 from mqt.predictor.rl.experiments.worker import CompilerWorker
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_negative_edit_budget_is_rejected() -> None:
+    """All adapters reject a negative edit budget through the shared action rules."""
+    with pytest.raises(ValueError, match="nonnegative"):
+        PipelineActions(None, max_edits=-1)
+
+
+@pytest.mark.parametrize(("max_edits", "edits"), [(-1, []), (0, ["4:SKIP"]), (2, ["4:INSERT:4"] * 3)])
+def test_cli_rejects_invalid_budget_before_creating_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, max_edits: int, edits: list[str]
+) -> None:
+    """Reject negative budgets and excess edits before starting a run."""
+    output = tmp_path / "run"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "pipeline_editor",
+            "--compiler",
+            "qiskit",
+            "--output",
+            str(output),
+            "--circuit",
+            "train/ghz_2_indep.qasm",
+            "--max-edits",
+            str(max_edits),
+            *[item for edit in edits for item in ("--edit", edit)],
+        ],
+    )
+    with pytest.raises(SystemExit) as error:
+        main()
+    assert error.value.code == 2
+    assert not output.exists()
 
 
 def test_edit_policy_rejects_mandatory_and_unknown_edits() -> None:
@@ -95,7 +130,10 @@ def test_pipeline_cli_writes_manifest_and_result(
 ) -> None:
     """Use the installed module command and inspect its completed run artifacts."""
     output = tmp_path / "run"
-    edit_args = ["--edit", f"{edit_index}:INSERT:{edit_index}", "--edit", f"{edit_index}:END"] if edited else []
+    edits = [f"INSERT:{edit_index}"] * 3 + ["END"] if edited else []
+    edit_args = [item for action in edits for item in ("--edit", f"{edit_index}:{action}")]
+    if edited:
+        edit_args.extend(["--max-edits", "4"])
     subprocess.run(
         [
             sys.executable,
@@ -125,8 +163,8 @@ def test_pipeline_cli_writes_manifest_and_result(
         assert manifest[f"{compiler}_level"] == 3
     assert manifest["circuits"] == ["train/ghz_2_indep.qasm"]
     assert manifest["seeds"] == [0]
-    assert manifest["edits"] == ({str(edit_index): [f"INSERT:{edit_index}", "END"]} if edited else {})
-    assert manifest["max_edits"] == 2
+    assert manifest["edits"] == ({str(edit_index): edits} if edited else {})
+    assert manifest["max_edits"] == (4 if edited else 2)
     assert manifest["inputs"] == Inputs(ROOT / "experiments/assets").manifest
     assert manifest["dependencies"]["qiskit"]
     assert len(manifest["commit"]) == 40
@@ -140,8 +178,7 @@ def test_pipeline_cli_writes_manifest_and_result(
     assert native_stage in {stage["stage_name"] for stage in rows[0]["stage_trace"]}
     if edited:
         decisions = [entry for entry in rows[0]["stage_trace"] if entry["stage_index"] == edit_index]
-        assert [entry["action"] for entry in decisions] == [f"INSERT:{edit_index}", "END"]
-        assert decisions[0]["status"] == "ok"
-        assert decisions[1]["status"] == "skipped"
-        assert [entry["edits_remaining"] for entry in decisions] == [2, 1]
-        assert decisions[0]["inserted_stage_index"] == edit_index
+        assert [entry["action"] for entry in decisions] == edits
+        assert [entry["status"] for entry in decisions] == ["ok", "ok", "ok", "skipped"]
+        assert [entry["edits_remaining"] for entry in decisions] == [4, 3, 2, 1]
+        assert all(entry["inserted_stage_index"] == edit_index for entry in decisions[:-1])

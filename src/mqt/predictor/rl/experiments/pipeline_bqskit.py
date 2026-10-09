@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from bqskit.compiler.compile import build_workflow
 
-from .pipeline_actions import PipelineActions
+from .pipeline_actions import MAX_EDITS, PipelineActions
 
 if TYPE_CHECKING:
     from bqskit.compiler.compiler import Compiler
@@ -59,6 +59,8 @@ def run_bqskit(
     compiler: Compiler,
     policy: Policy | None = None,
     on_event: EventCallback | None = None,
+    *,
+    max_edits: int = MAX_EDITS,
 ) -> tuple[Circuit, PassData, list[dict[str, Any]]]:
     """Keep native nested workflows and carry their full PassData across stages.
 
@@ -72,7 +74,7 @@ def run_bqskit(
     current = circuit.copy()
     data: PassData | None = None
     trace: list[dict[str, Any]] = []
-    actions = PipelineActions(policy)
+    actions = PipelineActions(policy, max_edits=max_edits)
     optional = {index: stage for index, stage in enumerate(workflow) if stage.name in OPTIONAL_STAGES}
     single_retarget = next(index for index, stage in enumerate(workflow) if stage.name == "Single Qudit Retargeting")
     finalization = next(index for index, stage in enumerate(workflow) if stage.name == "LogErrorPass")
@@ -139,6 +141,7 @@ def compile_bqskit(
     policy: Policy | None = None,
     *,
     optimization_level: int = 1,
+    max_edits: int = MAX_EDITS,
     max_synthesis_size: int = 3,
     synthesis_epsilon: float = 1e-8,
     error_threshold: float | None = None,
@@ -160,4 +163,4 @@ def compile_bqskit(
         error_sim_size=error_sim_size,
         seed=seed,
     )
-    return run_bqskit(circuit, workflow, compiler, policy, on_event)
+    return run_bqskit(circuit, workflow, compiler, policy, on_event, max_edits=max_edits)

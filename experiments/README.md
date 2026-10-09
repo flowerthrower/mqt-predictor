@@ -449,7 +449,8 @@ uv run --no-sync python -m mqt.predictor.rl.experiments.pipeline_editor \
 
 Change `--compiler` to `tket` or `bqskit` and use a fresh output directory.
 Paths passed to `--output` are relative to the working directory. Optional edits
-use the four actions below. Each compilation has a budget of **two edits**.
+use the four actions below. Each compilation defaults to **two edits**; set
+`--max-edits 6` to allow six, or `--max-edits 0` for an unchanged preset.
 Unmentioned stages use `KEEP`.
 
 | Action     | Behavior                                                                   | Edit cost |

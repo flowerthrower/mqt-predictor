@@ -20,10 +20,13 @@ MAX_EDITS = 2
 class PipelineActions:
     """Share edit budgets and stopping rules across the three native adapters."""
 
-    def __init__(self, policy: Policy | None) -> None:
+    def __init__(self, policy: Policy | None, *, max_edits: int = MAX_EDITS) -> None:
         """Start one compilation with the full edit budget."""
+        if max_edits < 0:
+            msg = "The edit budget must be nonnegative."
+            raise ValueError(msg)
         self.policy = policy
-        self.remaining = MAX_EDITS
+        self.remaining = max_edits
         self.ended = False
 
     def decide(
