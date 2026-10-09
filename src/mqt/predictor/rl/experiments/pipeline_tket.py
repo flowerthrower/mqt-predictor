@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import time
 from collections import Counter
 from typing import TYPE_CHECKING, Any
 
@@ -90,13 +91,13 @@ def run_tket(
                 if all(predicate.verify(unit.circuit) for predicate in stages[candidate].get_preconditions())
             }
             action = actions.decide(
-                state, optional=optional[index], insertions=insertions, can_end=any(optional[index:])
+                state, trace=trace, optional=optional[index], insertions=insertions, can_end=any(optional[index:])
             )
             inserted = int(action.split(":")[1]) if action.startswith("INSERT:") else None
             selected = stage if inserted is None else stages[inserted]
             execute = action != "SKIP" and (action != "END" or not optional[index])
             entry = {
-                **state,
+                **{key: value for key, value in state.items() if key != "history"},
                 "action": action,
                 "occurrence": occurrence if execute else None,
             }
@@ -104,8 +105,10 @@ def run_tket(
                 entry.update(inserted_stage_index=inserted, **insertions[inserted])
             if on_event is not None:
                 on_event({**entry, "event": "before"})
+            started = time.monotonic()
             if execute:
                 selected.apply(unit)
+            entry["runtime_seconds"] = time.monotonic() - started if execute else 0.0
             entry["after"] = features(unit.circuit)
             trace.append(entry)
             if on_event is not None:

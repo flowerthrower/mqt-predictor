@@ -148,6 +148,8 @@ def test_edits_preserve_unitary_and_measurement_wiring(decisions: tuple[str, ...
     assert set(calls[0]["allowed_actions"]) == ({"KEEP", "SKIP", "INSERT:4", "END"} if max_edits else {"KEEP"})
     assert calls[0]["insertion_candidates"][4]["stage_name"] == "optimization"
     assert len(trace) == len(decisions)
+    assert [len(state["history"]) for state in calls] == list(range(len(decisions)))
+    assert all("history" not in entry for entry in trace)
     assert [event["event"] for event in events] == ["before", "after"] * len(trace)
     for index, entry in enumerate(trace):
         assert entry["action"] == decisions[index]
@@ -157,8 +159,14 @@ def test_edits_preserve_unitary_and_measurement_wiring(decisions: tuple[str, ...
             assert entry["inserted_stage_index"] == 4
         if index:
             assert entry["before"] == trace[index - 1]["after"]
+            previous = calls[index]["history"][-1]
+            assert previous["action"] == decisions[index - 1]
+            assert previous["inserted_stage_index"] == 4
+            assert previous["runtime_seconds"] == trace[index - 1]["runtime_seconds"]
+            assert previous["executed"]
         if decisions[index] in {"SKIP", "END"}:
             assert entry["before"] == entry["after"]
+            assert entry["runtime_seconds"] == 0
     if len(decisions) == max_edits + 1:
         assert calls[-1]["allowed_actions"] == ["KEEP"]
     compiled_unitary = compiled.remove_final_measurements(inplace=False)

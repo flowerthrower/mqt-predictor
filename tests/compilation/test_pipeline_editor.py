@@ -34,6 +34,50 @@ def test_negative_edit_budget_is_rejected() -> None:
         PipelineActions(None, max_edits=-1)
 
 
+def test_policy_history_contains_only_completed_results() -> None:
+    """Expose signed pass effects without leaking future results or mutable traces."""
+    observations = []
+
+    def policy(state: dict[str, Any]) -> str:
+        observations.append(state)
+        return "KEEP"
+
+    actions = PipelineActions(policy)
+    state = {"stage_index": 4, "stage_name": "KAKDecomposition"}
+    trace: list[dict[str, Any]] = []
+    actions.decide(state.copy(), trace=trace, optional=True, insertions={}, can_end=True)
+    assert observations[0]["history"] == []
+    trace.append({
+        **state,
+        "stage_name": "SynthesiseTket",
+        "inserted_stage_index": 6,
+        "action": "INSERT:6",
+        "occurrence": 0,
+        "automatic": False,
+        "runtime_seconds": 0.25,
+        "before": {"qubits": 3, "depth": 8, "two_qubit_gates": 2, "gate_counts": {"CX": 2, "H": 1}},
+        "after": {"qubits": 3, "depth": 6, "two_qubit_gates": 1, "gate_counts": {"CX": 1, "Rz": 3}},
+    })
+    actions.decide(state.copy(), trace=trace, optional=True, insertions={}, can_end=True)
+    assert observations[0]["history"] == []
+    expected = {
+        "stage_index": 4,
+        "stage_name": "SynthesiseTket",
+        "inserted_stage_index": 6,
+        "action": "INSERT:6",
+        "executed": True,
+        "automatic": False,
+        "runtime_seconds": 0.25,
+        "changes": {"qubits": 0, "depth": -2, "two_qubit_gates": -1, "gate_counts": {"CX": -1, "H": -1, "Rz": 3}},
+    }
+    assert observations[1]["history"] == [expected]
+    observations[1]["history"][0]["changes"]["gate_counts"]["CX"] = 999
+    actions.decide(state.copy(), trace=trace, optional=True, insertions={}, can_end=True)
+    assert observations[2]["history"][0]["changes"]["gate_counts"]["CX"] == -1
+    assert trace[0]["after"]["gate_counts"]["CX"] == 1
+    json.dumps(observations, allow_nan=False)
+
+
 @pytest.mark.parametrize(("max_edits", "edits"), [(-1, []), (0, ["4:SKIP"]), (2, ["4:INSERT:4"] * 3)])
 def test_cli_rejects_invalid_budget_before_creating_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, max_edits: int, edits: list[str]

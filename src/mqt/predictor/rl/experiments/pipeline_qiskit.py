@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING, Any
 
 from qiskit.passmanager.base_tasks import Task
@@ -77,10 +78,12 @@ class _OptimizationDecision(Task):
         }
         while True:
             policy_state = {"compiler": "qiskit", "stage_index": 4, **stage, "before": features(passmanager_ir)}
-            decision = self.actions.decide(policy_state, optional=True, insertions={4: stage}, can_end=True)
+            decision = self.actions.decide(
+                policy_state, trace=self.trace, optional=True, insertions={4: stage}, can_end=True
+            )
             execute = decision not in {"SKIP", "END"}
             entry = {
-                **policy_state,
+                **{key: value for key, value in policy_state.items() if key != "history"},
                 "action": decision,
                 "occurrence": invocation if execute else None,
             }
@@ -88,12 +91,14 @@ class _OptimizationDecision(Task):
                 entry["inserted_stage_index"] = 4
             if self.on_event is not None:
                 self.on_event({**entry, "event": "before"})
+            started = time.monotonic()
             if execute:
                 if invocation:
                     # Each invocation must rerun analyses as well as transformations.
                     state.workflow_status.completed_passes.clear()
                 passmanager_ir, state = self.native.execute(passmanager_ir, state, callback)
                 invocation += 1
+            entry["runtime_seconds"] = time.monotonic() - started if execute else 0.0
             entry["after"] = features(passmanager_ir)
             self.trace.append(entry)
             if self.on_event is not None:

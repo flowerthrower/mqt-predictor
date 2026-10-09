@@ -157,8 +157,22 @@ def test_optional_edits_preserve_native_validity_and_measurement_semantics(
     else:
         assert trace[-1]["edits_remaining"] == 0
     assert len(events) == 2 * len(trace)
+    assert [len(state["history"]) for state in seen] == list(range(len(seen)))
+    assert all("history" not in entry for entry in trace)
+    for state in seen[1:]:
+        previous = state["history"][-1]
+        entry = trace[len(state["history"]) - 1]
+        assert previous["action"] == entry["action"]
+        assert previous["executed"] == (entry["occurrence"] is not None)
+        assert previous["runtime_seconds"] == entry["runtime_seconds"]
+        if not previous["executed"]:
+            assert previous["runtime_seconds"] == 0
+            assert previous["changes"] == {"qubits": 0, "depth": 0, "two_qubit_gates": 0, "gate_counts": {}}
     for entry, before_event, after_event in zip(trace, events[::2], events[1::2], strict=True):
-        assert before_event == {**{key: value for key, value in entry.items() if key != "after"}, "event": "before"}
+        assert before_event == {
+            **{key: value for key, value in entry.items() if key not in {"after", "runtime_seconds"}},
+            "event": "before",
+        }
         assert after_event == {**entry, "event": "after"}
     assert observe(actual, target, physical=True)["esp_kind"] == "exact"
     assert all(
@@ -237,6 +251,9 @@ def test_insert_reuses_native_stage_before_continuing_same_cursor(
     assert trace[4]["occurrence"] == 0
     assert trace[5]["occurrence"] == 1
     assert seen[5]["before"] == trace[4]["after"]
+    assert seen[5]["history"][-1]["stage_index"] == 4
+    assert seen[5]["history"][-1]["inserted_stage_index"] == 6
+    assert seen[5]["history"][-1]["stage_name"] == "SynthesiseTket"
 
 
 @pytest.mark.parametrize(("cursor", "source"), [(4, 1), (8, 6)])

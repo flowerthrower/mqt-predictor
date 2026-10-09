@@ -512,6 +512,16 @@ distinguish inserted stage indices, explicit decisions, and automatic work after
 `END`. These are stage edits; composite native stages retain their internal
 passes and control flow.
 
+The callback's `history` lists completed stage decisions in order, with the
+cursor and inserted-stage indices, action, executed/skipped flag, automatic-work
+flag, observed runtime, and signed changes in qubit count, depth, two-qubit
+count, and native gate counts. It includes only results available before the
+current decision. History is reconstructed from completed trace entries and is
+not nested inside the saved trace. Qiskit history covers its optimization-stage
+invocations; TKET and BQSKit history covers their top-level stages. Zero count
+changes do not prove an unchanged circuit or unchanged ESP. No intermediate ESP,
+graph features, or learned selector is added by this observation interface.
+
 To run the native high-optimization presets without any edits or learned policy:
 
 ```bash

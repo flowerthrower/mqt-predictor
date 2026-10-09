@@ -168,6 +168,18 @@ def test_optional_edit_preserves_unitary_maps_and_measurements(
         return next(commands[state["stage_index"]], "KEEP") if state["stage_index"] in commands else "KEEP"
 
     actual, data, trace = compile_bqskit(circuit, model(3), compiler, policy, optimization_level=level)
+    assert [len(state["history"]) for state in seen] == list(range(len(seen)))
+    assert all("history" not in entry for entry in trace)
+    for state in seen[1:]:
+        previous = state["history"][-1]
+        entry = trace[len(state["history"]) - 1]
+        assert previous["stage_name"] == entry["stage_name"]
+        assert previous["inserted_stage_index"] == entry.get("inserted_stage_index")
+        assert previous["executed"] == (entry["occurrence"] is not None)
+        assert previous["runtime_seconds"] == entry["runtime_seconds"]
+        if not previous["executed"]:
+            assert previous["runtime_seconds"] == 0
+            assert previous["changes"] == {"qubits": 0, "depth": 0, "two_qubit_gates": 0, "gate_counts": {}}
     assert_measurements_and_unitary(circuit, actual, data)
     assert [entry["action"] for entry in trace if entry["action"] != "KEEP" and not entry["automatic"]] == [
         action for actions in edits.values() for action in actions

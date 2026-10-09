@@ -100,13 +100,17 @@ def run_bqskit(
                 "before": before,
             }
             action = actions.decide(
-                state, optional=index in optional, insertions=insertions, can_end=any(i >= index for i in optional)
+                state,
+                trace=trace,
+                optional=index in optional,
+                insertions=insertions,
+                can_end=any(i >= index for i in optional),
             )
             insertion = int(action.split(":")[1]) if action.startswith("INSERT:") else None
             executed_stage = workflow[insertion] if insertion is not None else stage
             skip = action == "SKIP" or (action == "END" and index in optional)
             entry = {
-                **state,
+                **{key: value for key, value in state.items() if key != "history"},
                 "stage_name": executed_stage.name,
                 "action": action,
                 "occurrence": None if skip else occurrence,

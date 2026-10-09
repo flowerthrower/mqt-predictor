@@ -33,6 +33,7 @@ class PipelineActions:
         self,
         state: dict[str, Any],
         *,
+        trace: list[dict[str, Any]],
         optional: bool,
         insertions: dict[int, dict[str, Any]],
         can_end: bool,
@@ -43,6 +44,8 @@ class PipelineActions:
         END spends one edit, then required stages run and optional stages skip.
         INSERT does not advance the native cursor; adapters request another
         decision after its execution with updated circuit features.
+        History contains completed stages only. Count changes do not establish
+        circuit equivalence or a change in ESP.
         """
         allowed = ["SKIP" if self.ended and optional else "KEEP"]
         if not self.ended and self.remaining:
@@ -57,6 +60,28 @@ class PipelineActions:
             edits_remaining=self.remaining,
             automatic=self.ended,
         )
+        history = []
+        for entry in trace:
+            before, after = entry["before"], entry["after"]
+            counts_before, counts_after = before["gate_counts"], after["gate_counts"]
+            history.append({
+                "stage_index": entry["stage_index"],
+                "stage_name": entry["stage_name"],
+                "inserted_stage_index": entry.get("inserted_stage_index"),
+                "action": entry["action"],
+                "executed": entry["occurrence"] is not None,
+                "automatic": entry["automatic"],
+                "runtime_seconds": entry["runtime_seconds"],
+                "changes": {
+                    **{key: after[key] - before[key] for key in ("qubits", "depth", "two_qubit_gates")},
+                    "gate_counts": {
+                        gate: change
+                        for gate in sorted(counts_before.keys() | counts_after.keys())
+                        if (change := counts_after.get(gate, 0) - counts_before.get(gate, 0))
+                    },
+                },
+            })
+        state["history"] = history
         action = allowed[0] if self.ended or self.policy is None else self.policy(state)
         if action not in allowed:
             msg = f"Invalid {action!r} for stage {state['stage_index']}:{state['stage_name']}; allowed: {allowed}."
