@@ -11,10 +11,12 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
+from qiskit.passmanager import DoWhileController
 from qiskit.passmanager.base_tasks import Task
 from qiskit.transpiler import PassManager
+from qiskit.transpiler.passes import TwoQubitPeepholeOptimization
 from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 
 from .pipeline_actions import MAX_EDITS, PipelineActions
@@ -132,3 +134,54 @@ def run_native_qiskit(
             _OptimizationDecision(native, policy, trace, seed=seed, max_edits=max_edits, on_event=on_event)
         ])
     return preset.run(circuit, callback=callback), trace
+
+
+def run_qiskit_variant(
+    circuit: QuantumCircuit,
+    target: Target,
+    seed: int,
+    *,
+    optimization_level: int = 3,
+    optimization: Literal["native", "skip_optimization", "post_layout", "one_sweep", "peephole_once"] = "native",
+    callback: Callable | None = None,
+) -> QuantumCircuit:
+    """Run a native preset or a fixed O3 ablation without feature or trace overhead.
+
+    ``post_layout`` skips gate optimization but retains the native post-layout
+    search and conditional layout application. ``one_sweep`` retains every pass
+    in the first sweep, including basis checks and translation. ``peephole_once``
+    runs two-qubit peephole optimization only in the first sweep, with native
+    cleanup and convergence checks continuing afterward.
+    """
+    if optimization_level not in {1, 2, 3}:
+        msg = "Native preset level must be 1, 2, or 3."
+        raise ValueError(msg)
+    if optimization not in {"native", "skip_optimization", "post_layout", "one_sweep", "peephole_once"}:
+        msg = f"Unknown Qiskit optimization variant: {optimization}"
+        raise ValueError(msg)
+    if optimization != "native" and optimization_level != 3:
+        msg = "Optimization ablations require the native O3 preset."
+        raise ValueError(msg)
+    preset = generate_preset_pass_manager(optimization_level, target=target, seed_transpiler=seed)
+    if optimization == "skip_optimization":
+        preset.optimization = None
+    elif optimization != "native":
+        assert preset.optimization is not None
+        tasks = list(preset.optimization.to_flow_controller().tasks)
+        loops = [(index, task) for index, task in enumerate(tasks) if isinstance(task, DoWhileController)]
+        if len(loops) != 1:
+            msg = "Expected one native Qiskit optimization loop."
+            raise ValueError(msg)
+        index, loop = loops[0]
+        if optimization == "post_layout":
+            tasks = tasks[index + 1 :]
+        elif optimization == "one_sweep":
+            loop.do_while = lambda _: False
+        else:
+            if not isinstance(loop.tasks[0], TwoQubitPeepholeOptimization):
+                msg = "Expected native two-qubit peephole optimization at the start of the loop."
+                raise ValueError(msg)
+            tasks.insert(index, loop.tasks[0])
+            loop.tasks = loop.tasks[1:]
+        preset.optimization = PassManager(tasks)
+    return preset.run(circuit, callback=callback)

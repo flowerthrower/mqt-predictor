@@ -542,3 +542,96 @@ with native search settings. Its level 4 preset is not exposed here. All runs
 retain the same frozen Boston target and final ESP scorer, and the editor
 overhead described above. These commands run only the named circuits; append
 other exact archive names to `--circuit` for a larger evaluation.
+
+## Weekend native-pipeline study
+
+On branch `scasia-pipeline-editor`, run from the repository root:
+
+```bash
+uv sync --locked --extra gnn
+tmux new -s pipeline-weekend
+uv run --no-sync python -u -m mqt.predictor.rl.experiments.pipeline_study \
+  --config experiments/pipeline-weekend.toml
+```
+
+The existing `gnn` extra supplies the experiment environment, including the
+process-memory monitor; this study trains trees and forests on manual circuit
+features. It does not train a GNN or RL model. Detach with `Ctrl-b`, then `d`;
+the job continues after SSH disconnects. Resume an interrupted study with the
+same command plus `--resume`. Configuration, source, dependency, dataset and
+model hashes must still match. Once models are frozen, resuming skips collection
+and reuses those models. Completed failures remain recorded; they are not
+silently retried or scored as zero ESP.
+
+`experiments/pipeline-weekend.toml` sets these defaults:
+
+| Setting           | Value                                                                                      |
+| ----------------- | ------------------------------------------------------------------------------------------ |
+| Hardware budget   | 12 single-thread workers on a 16-core, 64 GB server                                        |
+| Memory guard      | 4 GiB per worker and its descendants; 48 GiB total                                         |
+| Compilation guard | 600 seconds per complete compilation                                                       |
+| Phase budgets     | 32 hours collection, 10 hours evaluation, 6 hours serial timing                            |
+| Inputs            | Frozen 321 training / 41 historical test circuits and Boston snapshot                      |
+| Search            | Up to 32 edited plans per preset, at most 6 edits per plan                                 |
+| Compiler seeds    | 0, 1, 2 for Qiskit/BQSKit; native fixed seed 0 for TKET                                    |
+| Learned models    | Tree versus forest, three training seeds, three ESP/time preferences                       |
+| Serial timing     | 12 test circuits sampled with a fixed seed, one excluded warmup and three measured repeats |
+
+The phase budgets are upper limits on compilation work, not a promise to use
+exactly 48 hours or finish the whole candidate matrix. Model fitting and worker
+startup add time. Collection visits balanced circuit batches, including edits,
+before advancing to larger circuits and additional seeds. Partial coverage is
+saved and reported. Worker-tree memory is sampled and can briefly overshoot;
+each worker has distinct BQSKit runtime ports. Timeout, memory-limit and SDK
+failure records are excluded from learning targets and paired quality means.
+
+The candidate set includes native Qiskit O1/O2/O3, TKET O2/O3 and BQSKit levels
+1/2/3, unchanged editor controls, native stage skips, repeats and bounded mixed
+edits. TKET also includes legal adjacent-stage reorderings. Qiskit O3
+additionally tests one optimization sweep, one two-qubit peephole sweep, and
+skipping gate optimization while retaining calibrated post-layout. These reuse
+native passes; there is no insertion across SDKs. BQSKit still uses connectivity
+and native gates without calibration-aware placement; final ESP uses the shared
+snapshot.
+
+The model predicts signed ESP change and full compilation time relative to its
+compiler's native level-3 preset. It selects one complete plan from the input
+features, then executes that plan once. The objective is
+`time / native_time - 1 - weight * (ESP - native_ESP)`, with ESP on a 0–1 scale.
+Weights 10, 50 and 100 allow a one-percentage-point ESP gain to justify 10%, 50%
+or 100% extra time. Both quality gains and losses count. Model selection uses
+training-only cross-validation grouped by circuit family and identical circuit
+contents, including measured plan-selection overhead when comparing model types.
+Training-selected fixed plans are also evaluated, to test whether learning helps
+beyond choosing one good static pipeline. The 41 historical test circuits have
+already informed earlier research; they are not a pristine holdout.
+
+Parallel collection/evaluation timings are exploratory. The separate timing
+phase runs one compilation at a time with shuffled variant order. Keep the
+server otherwise idle for that phase. It includes feature extraction, model
+inference, adapter overhead and native compiler startup; it excludes input
+loading, model loading and final ESP scoring. No per-pass circuit-conversion
+observer runs during these measurements. Repetitions measure latency and do not
+select the best compiled circuit.
+
+Results go to `../../scasia-runs/pipeline-weekend-v1`, relative to the TOML
+file: `manifest.json`, `collect.jsonl`, `evaluate.jsonl`, `timing.jsonl`, frozen
+models under `models/`, per-worker logs, and `report.json`. The report includes
+ESP differences, runtime ratios, selected plans, failures and matched coverage.
+Different success subsets must not be treated as a common-set comparison. Use
+`--stage collect|train|evaluate|timing|report` with `--resume` to continue one
+phase. Once trained, start a new output directory to change the protocol.
+
+Before a long run, a small end-to-end check is available:
+
+```bash
+uv run --no-sync python -u -m mqt.predictor.rl.experiments.pipeline_study \
+  --config experiments/pipeline-weekend.toml \
+  --output ../scasia-runs/pipeline-weekend-smoke --smoke
+```
+
+The optional `--output` path is relative to the current working directory. This
+uses one worker, eight training circuits and two test circuits with at most
+three qubits, and shorter deadlines. It checks execution and recovery; it is not
+evidence of compiler-quality improvement. This remains an experiment-only
+branch.

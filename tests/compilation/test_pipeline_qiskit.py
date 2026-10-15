@@ -272,3 +272,111 @@ def test_end_preserves_native_finalization(monkeypatch: pytest.MonkeyPatch) -> N
     assert len(trace) == 1
     assert trace[0]["action"] == "END"
     assert trace[0]["occurrence"] is None
+
+
+@pytest.mark.parametrize("level", [1, 2, 3])
+@pytest.mark.parametrize("seed", [0, 7])
+def test_uninstrumented_native_matches_preset(frozen_inputs: tuple[Inputs, Target], level: int, seed: int) -> None:
+    """Untouched presets retain every pass, circuit, and physical layout."""
+    inputs, target = frozen_inputs
+    circuit = inputs.circuit("test/qft_5_indep.qasm")
+    expected_trace = []
+    actual_trace = []
+    expected = generate_preset_pass_manager(level, target=target, seed_transpiler=seed).run(
+        circuit, callback=lambda **event: expected_trace.append((event["pass_"].name(), deepcopy(event["dag"])))
+    )
+    actual = editor.run_qiskit_variant(
+        circuit,
+        target,
+        seed,
+        optimization_level=level,
+        callback=lambda **event: actual_trace.append((event["pass_"].name(), deepcopy(event["dag"]))),
+    )
+    assert actual_trace == expected_trace
+    assert actual == expected
+    assert actual.layout is not None
+    assert expected.layout is not None
+    assert actual.layout.initial_index_layout() == expected.layout.initial_index_layout()
+    assert actual.layout.final_index_layout() == expected.layout.final_index_layout()
+
+
+@pytest.mark.parametrize("optimization", ["skip_optimization", "post_layout", "one_sweep", "peephole_once"])
+def test_ablation_retains_native_passes_and_finalization(
+    monkeypatch: pytest.MonkeyPatch, frozen_inputs: tuple[Inputs, Target], optimization: str
+) -> None:
+    """Only the requested native loop work changes; post-layout still follows it."""
+    inputs, target = frozen_inputs
+    preset = generate_preset_pass_manager(3, target=target, seed_transpiler=0)
+    assert preset.optimization is not None
+    tasks = preset.optimization.to_flow_controller().tasks
+    loop = next(task for task in tasks if isinstance(task, DoWhileController))
+    peephole, cleanup = list(loop.tasks)[:2]
+    basis_check = next(task for task in loop.tasks if getattr(task, "name", lambda: "")() == "GatesInBasis")
+    post_layout = next(task for task in tasks if getattr(task, "name", lambda: "")() == "VF2PostLayout")
+    original_loop_tasks = loop.tasks
+    original_stages = {stage: getattr(preset, stage) for stage in preset.expanded_stages if stage != "optimization"}
+    executed = []
+    monkeypatch.setattr(editor, "generate_preset_pass_manager", lambda *_, **__: preset)
+    editor.run_qiskit_variant(
+        inputs.circuit("test/qft_5_indep.qasm"),
+        target,
+        0,
+        optimization=cast("Any", optimization),
+        callback=lambda **event: executed.append(event["pass_"]),
+    )
+    assert all(getattr(preset, stage) is original for stage, original in original_stages.items())
+    peephole_positions = [index for index, task in enumerate(executed) if task is peephole]
+    cleanup_positions = [index for index, task in enumerate(executed) if task is cleanup]
+    basis_positions = [index for index, task in enumerate(executed) if task is basis_check]
+    post_layout_positions = [index for index, task in enumerate(executed) if task is post_layout]
+    if optimization in {"skip_optimization", "post_layout"}:
+        assert not peephole_positions
+        assert not cleanup_positions
+        assert not basis_positions
+    else:
+        assert len(peephole_positions) == 1
+        assert peephole_positions[0] < cleanup_positions[0] < basis_positions[0]
+        expected_tasks = original_loop_tasks if optimization == "one_sweep" else original_loop_tasks[1:]
+        assert all(task is original for task, original in zip(loop.tasks, expected_tasks, strict=True))
+        assert len(cleanup_positions) == (1 if optimization == "one_sweep" else 2)
+        assert len(basis_positions) == len(cleanup_positions)
+    assert bool(post_layout_positions) == (optimization != "skip_optimization")
+    if cleanup_positions:
+        assert post_layout_positions[0] > basis_positions[-1]
+
+
+@pytest.mark.parametrize("optimization", ["skip_optimization", "post_layout", "one_sweep", "peephole_once"])
+def test_ablations_preserve_unitary_target_and_measurement_wiring(optimization: str) -> None:
+    """Each fixed ablation produces valid physical gates and original measurements."""
+    target = GenericBackendV2(
+        4,
+        basis_gates=["cx", "rz", "sx", "x"],
+        coupling_map=[[0, 1], [1, 0], [1, 2], [2, 1], [2, 3], [3, 2]],
+        seed=123,
+    ).target
+    circuit = QuantumCircuit(4, 4)
+    circuit.h(0)
+    circuit.cx(0, 3)
+    circuit.rz(0.31, 1)
+    circuit.cx(1, 2)
+    circuit.swap(0, 2)
+    circuit.measure([0, 1, 2, 3], [2, 0, 3, 1])
+    compiled = editor.run_qiskit_variant(circuit, target, 7, optimization=cast("Any", optimization))
+    compiled_unitary = compiled.remove_final_measurements(inplace=False)
+    original_unitary = circuit.remove_final_measurements(inplace=False)
+    assert compiled_unitary is not None
+    assert original_unitary is not None
+    assert Operator.from_circuit(compiled_unitary).equiv(Operator(original_unitary))
+    assert compiled.layout is not None
+    final_layout = compiled.layout.final_index_layout()
+    measurements = {
+        compiled.find_bit(item.clbits[0]).index: compiled.find_bit(item.qubits[0]).index
+        for item in compiled.data
+        if item.operation.name == "measure"
+    }
+    assert measurements == {2: final_layout[0], 0: final_layout[1], 3: final_layout[2], 1: final_layout[3]}
+    for item in compiled.data:
+        assert target.instruction_supported(
+            operation_name=item.operation.name,
+            qargs=tuple(compiled.find_bit(q).index for q in item.qubits),
+        )

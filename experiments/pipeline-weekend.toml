@@ -1,0 +1,40 @@
+# Copyright (c) 2023 - 2026 Chair for Design Automation, TUM
+# Copyright (c) 2025 - 2026 Munich Quantum Software Company GmbH
+# All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
+# Licensed under the MIT License
+
+# Paths are relative to this file. Use a new output for a changed protocol.
+assets = "assets"
+output = "../../scasia-runs/pipeline-weekend-v1"
+
+[study]
+# 12 single-thread compiler processes, with room for runtime and OS overhead.
+workers = 12
+# Stop submitting work at each deadline, then proceed to learning/confirmation.
+collect_hours = 32
+evaluate_hours = 10
+timing_hours = 6
+# Zero selects the complete historical split: 321 training / 41 test circuits.
+train_circuits = 0
+test_circuits = 0
+timing_circuits = 12
+plans_per_preset = 32
+max_edits = 6
+plan_seed = 0
+compiler_seeds = [0, 1, 2]
+model_seeds = [0, 1, 2]
+# A 1 pp ESP gain can justify 10%, 50%, or 100% extra compilation time.
+tradeoff_weights = [10, 50, 100]
+timing_repetitions = 3
+
+[worker]
+threads = 1
+memory_gib = 4
+startup_timeout_seconds = 120
+# Resource guard, not a learning penalty. Censored runs are excluded.
+compilation_timeout_seconds = 600
+# Each worker owns base+4*slot and base+4*slot+2.
+bqskit_port_base = 43472
